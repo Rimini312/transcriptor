@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Matching Transcriptor · Trompeta Sib</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="app">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">matching transcriptor</p>
+        <h1>Trompeta Sib · memoria melódica</h1>
+        <p class="lead">Graba una idea, mira la afinación, divide por compases y genera una transcripción aproximada editable.</p>
+      </div>
+      <button id="debugToggle" class="ghost small" title="También Ctrl+D">Consola técnica</button>
+    </header>
+
+    <section class="panel grid two">
+      <div class="block">
+        <h2>Tempo</h2>
+        <div class="row">
+          <label>BPM
+            <input id="bpm" type="number" min="30" max="260" value="92" />
+          </label>
+          <label>Compás
+            <select id="beatsPerBar">
+              <option value="3">3/4</option>
+              <option value="4" selected>4/4</option>
+              <option value="5">5/4</option>
+              <option value="6">6/4</option>
+            </select>
+          </label>
+          <button id="tapTempo" class="secondary">Tap tempo</button>
+        </div>
+        <div class="row compact">
+          <label class="check"><input id="countIn" type="checkbox" checked /> Entrada 1 compás</label>
+          <label class="check"><input id="metronome" type="checkbox" /> Metrónomo suave</label>
+        </div>
+      </div>
+
+      <div class="block">
+        <h2>Lectura musical</h2>
+        <div class="row">
+          <label>Instrumento
+            <select id="instrument">
+              <option value="2" selected>Trompeta en Sib</option>
+              <option value="0">Concert pitch</option>
+              <option value="9">Sax alto / Mib</option>
+            </select>
+          </label>
+          <label>Accidentales
+            <select id="accidentals">
+              <option value="flats" selected>Preferir bemoles</option>
+              <option value="sharps">Preferir sostenidos</option>
+            </select>
+          </label>
+          <label>A4
+            <input id="a4" type="number" min="430" max="450" value="440" />
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel grid two">
+      <div class="block">
+        <h2>Sensibilidad</h2>
+        <div class="row">
+          <label>Afinación
+            <select id="pitchTolerance">
+              <option value="15">Estricta ±15 cents</option>
+              <option value="30" selected>Normal ±30 cents</option>
+              <option value="45">Suave ±45 cents</option>
+              <option value="60">Muy suave ±60 cents</option>
+            </select>
+          </label>
+          <label>Ritmo
+            <select id="rhythmMode">
+              <option value="strict">Estricto</option>
+              <option value="human" selected>Humano</option>
+              <option value="loose">Suelto</option>
+            </select>
+          </label>
+          <label>Cuantizar
+            <select id="quantize">
+              <option value="auto" selected>Auto</option>
+              <option value="1">Negras</option>
+              <option value="0.5">Corcheas</option>
+              <option value="0.25">Semicorcheas</option>
+              <option value="0">Libre</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <div class="block transport">
+        <h2>Grabación</h2>
+        <div class="buttons">
+          <button id="recordBtn" class="primary">Grabar</button>
+          <button id="pauseBtn" class="secondary" disabled>Pausa</button>
+          <button id="stopBtn" class="danger" disabled>Stop</button>
+        </div>
+        <p id="status" class="status">Esperando micrófono.</p>
+      </div>
+    </section>
+
+    <section class="panel tuner-panel">
+      <div class="tuner">
+        <div class="noteBox">
+          <span class="label">nota escrita</span>
+          <div id="writtenNote" class="bigNote">—</div>
+          <div id="concertNote" class="subNote">sonido real: —</div>
+        </div>
+        <div class="meterWrap">
+          <div class="meter">
+            <div class="meterLine"></div>
+            <div id="needle" class="needle"></div>
+          </div>
+          <div class="meterLabels"><span>-50</span><span>0 cents</span><span>+50</span></div>
+          <p id="centsText" class="cents">—</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="sectionHead">
+        <div>
+          <h2>Transcripción</h2>
+          <p class="muted">Base aproximada. Haz clic en el texto si quieres corregirlo antes de copiar.</p>
+        </div>
+        <div class="buttons smallButtons">
+          <button id="copyText" class="secondary">Copiar notas</button>
+          <button id="downloadJson" class="secondary">JSON</button>
+          <button id="downloadAudio" class="secondary" disabled>Audio</button>
+        </div>
+      </div>
+      <div id="bars" class="bars empty">Aún no hay transcripción.</div>
+      <textarea id="plainText" spellcheck="false" placeholder="Aquí aparecerá la versión editable de la transcripción..."></textarea>
+    </section>
+
+    <section id="debugPanel" class="panel debug hidden">
+      <div class="sectionHead">
+        <div>
+          <h2>Consola técnica</h2>
+          <p class="muted">Para pasarme datos exactos: parámetros, frames, segmentos y cuantización.</p>
+        </div>
+        <div class="buttons smallButtons">
+          <button id="copyReport" class="secondary">Copiar informe para ChatGPT</button>
+          <button id="clearDebug" class="ghost">Limpiar</button>
+        </div>
+      </div>
+      <pre id="debugOutput">Sin datos todavía.</pre>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
