@@ -16,6 +16,7 @@
     rhythmMode: $('rhythmMode'),
     quantize: $('quantize'),
     holdNoteMs: $('holdNoteMs'),
+    micSensitivity: $('micSensitivity'),
     tunerBtn: $('tunerBtn'),
     recordBtn: $('recordBtn'),
     pauseBtn: $('pauseBtn'),
@@ -25,10 +26,18 @@
     concertNote: $('concertNote'),
     needle: $('needle'),
     centsText: $('centsText'),
+    meterLeftLabel: $('meterLeftLabel'),
+    meterCenterLabel: $('meterCenterLabel'),
+    meterRightLabel: $('meterRightLabel'),
+    signalFill: $('signalFill'),
+    beatIndicator: $('beatIndicator'),
     staff: $('staff'),
     bars: $('bars'),
     plainText: $('plainText'),
     copyText: $('copyText'),
+    downloadTxt: $('downloadTxt'),
+    downloadCsv: $('downloadCsv'),
+    downloadMusicXml: $('downloadMusicXml'),
     downloadJson: $('downloadJson'),
     downloadAudio: $('downloadAudio'),
     debugToggle: $('debugToggle'),
@@ -68,6 +77,7 @@
     lastStableData: null,
     lastStableAt: 0,
     lastDisplayedHeld: false,
+    beatTimerStarted: false,
   };
 
   function settings() {
@@ -81,6 +91,7 @@
       rhythmMode: els.rhythmMode.value,
       quantize: els.quantize.value,
       holdNoteMs: Number(els.holdNoteMs.value) || 7000,
+      micSensitivity: els.micSensitivity?.value || 'normal',
       countIn: els.countIn.checked,
       metronome: els.metronome.checked,
       minConcertFreq: 135,
@@ -109,6 +120,17 @@
     const octave = Math.floor(rounded / 12) - 1;
     const pc = ((rounded % 12) + 12) % 12;
     return `${noteNames[accidentals][pc]}${octave}`;
+  }
+
+  function visualNoteName(label) {
+    return String(label || '').replace(/b/g, '♭').replace(/#/g, '♯');
+  }
+
+  function sensitivityProfile(value) {
+    if (value === 'low') return { zeroGate: 0.014, rmsFloor: 0.006, clarityMin: 0.47, holdRms: 0.0028 };
+    if (value === 'high') return { zeroGate: 0.005, rmsFloor: 0.0020, clarityMin: 0.34, holdRms: 0.0012 };
+    if (value === 'max') return { zeroGate: 0.0025, rmsFloor: 0.0010, clarityMin: 0.27, holdRms: 0.00045 };
+    return { zeroGate: 0.008, rmsFloor: 0.0030, clarityMin: 0.39, holdRms: 0.0018 };
   }
 
   function durationLabel(beats) {
@@ -144,7 +166,7 @@
   function buildReport(full = true) {
     const analysis = state.lastAnalysis || null;
     const payload = {
-      app: 'transcriptor-v0.2',
+      app: 'transcriptor-v0.3',
       sessionId: state.sessionId,
       generatedAt: new Date().toISOString(),
       settings: settings(),
@@ -169,11 +191,13 @@
     const x = new Float32Array(size);
     for (let i = 0; i < size; i++) {
       const v = buffer[i] - mean;
-      x[i] = Math.abs(v) < 0.015 ? 0 : v; // quita parte del ruido bajo sin matar la nota
+      const zeroGate = opts.zeroGate ?? 0.008;
+      x[i] = Math.abs(v) < zeroGate ? 0 : v; // puerta de ruido ajustable
       rms += v * v;
     }
     rms = Math.sqrt(rms / size);
-    if (rms < 0.0055) return { freq: null, rms, clarity: 0 };
+    const rmsFloor = opts.rmsFloor ?? 0.003;
+    if (rms < rmsFloor) return { freq: null, rms, clarity: 0 };
 
     const minFreq = opts.minFreq || 135;
     const maxFreq = opts.maxFreq || 1200;
@@ -201,7 +225,8 @@
       }
     }
 
-    if (bestLag <= 0 || bestCorr < 0.43) return { freq: null, rms, clarity: Math.max(0, bestCorr || 0) };
+    const clarityMin = opts.clarityMin ?? 0.39;
+    if (bestLag <= 0 || bestCorr < clarityMin) return { freq: null, rms, clarity: Math.max(0, bestCorr || 0) };
 
     // Corrección anti-subarmónicos: si hay un pico más corto casi igual de bueno, preferirlo.
     for (let lag = minLag + 1; lag < bestLag; lag++) {
@@ -242,7 +267,7 @@
     state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
     const source = state.audioContext.createMediaStreamSource(state.stream);
     state.analyser = state.audioContext.createAnalyser();
-    state.analyser.fftSize = 8192;
+    state.analyser.fftSize = 16384;
     state.analyser.smoothingTimeConstant = 0;
     source.connect(state.analyser);
     els.tunerBtn.textContent = 'Afinador activo';
@@ -263,7 +288,14 @@
     const buffer = new Float32Array(state.analyser.fftSize);
     state.analyser.getFloatTimeDomainData(buffer);
     const s = settings();
-    const result = autoCorrelate(buffer, state.audioContext.sampleRate, { minFreq: s.minConcertFreq, maxFreq: s.maxConcertFreq });
+    const profile = sensitivityProfile(s.micSensitivity);
+    const result = autoCorrelate(buffer, state.audioContext.sampleRate, {
+      minFreq: s.minConcertFreq,
+      maxFreq: s.maxConcertFreq,
+      zeroGate: profile.zeroGate,
+      rmsFloor: profile.rmsFloor,
+      clarityMin: profile.clarityMin,
+    });
 
     let data = null;
     let held = false;
@@ -284,11 +316,11 @@
       }
     }
 
-    if (!data && state.lastStableData) {
+    let uiData = data;
+    if (!uiData && state.lastStableData) {
       const age = now - state.lastStableAt;
-      const stillSound = result.rms > 0.010;
-      if (age <= s.holdNoteMs && stillSound) {
-        data = {
+      if (age <= s.holdNoteMs) {
+        uiData = {
           ...state.lastStableData,
           result: { ...state.lastStableData.result, rms: result.rms, clarity: result.clarity || state.lastStableData.result.clarity },
           held: true,
@@ -297,11 +329,14 @@
       }
     }
 
-    updateTuner(data);
+    updateTuner(uiData, result, s);
+    updateBeatIndicator();
 
     if (state.isRecording && !state.isPaused && now - state.lastPitchAt > 42) {
       state.lastPitchAt = now;
-      if (data) pushPitchFrame(data, held);
+      const strongEnoughForHold = result.rms >= profile.holdRms;
+      if (data) pushPitchFrame(data, false);
+      else if (uiData && uiData.held && strongEnoughForHold) pushPitchFrame(uiData, true);
       else pushRestFrame(result);
     }
 
@@ -339,27 +374,70 @@
     });
   }
 
-  function updateTuner(data) {
+  function updateTuner(data, liveResult = null, s = settings()) {
+    const range = Math.max(15, Number(s.pitchTolerance) || 30);
+    els.meterLeftLabel.textContent = `-${range}`;
+    els.meterCenterLabel.textContent = '0 cents';
+    els.meterRightLabel.textContent = `+${range}`;
+
+    const rms = liveResult?.rms ?? data?.result?.rms ?? 0;
+    const clarity = liveResult?.clarity ?? data?.result?.clarity ?? 0;
+    if (els.signalFill) {
+      const signal = clamp((rms / 0.045) * 100, 0, 100);
+      els.signalFill.style.width = `${signal}%`;
+      els.signalFill.style.opacity = `${clamp(0.25 + clarity * 0.75, 0.25, 1)}`;
+    }
+
     document.body.classList.toggle('held-note', Boolean(data?.held));
     if (!data) {
+      const age = performance.now() - state.lastStableAt;
+      if (state.lastStableData && age <= (s.holdNoteMs || 7000)) {
+        const last = state.lastStableData;
+        els.writtenNote.textContent = visualNoteName(noteName(last.writtenMidi, last.s.accidentals));
+        els.concertNote.textContent = `última nota: ${visualNoteName(noteName(last.concertMidi, last.s.accidentals))} · esperando señal estable`;
+        const pos = clamp(50 + (last.cents / range) * 50, 0, 100);
+        els.needle.style.left = `${pos}%`;
+        els.centsText.textContent = `última lectura ${last.cents >= 0 ? '+' : ''}${last.cents.toFixed(0)} cents · señal baja`;
+        return;
+      }
       els.writtenNote.textContent = '—';
       els.concertNote.textContent = 'sonido real: —';
-      els.centsText.textContent = 'sin señal estable';
+      els.centsText.textContent = 'sin señal útil';
       els.needle.style.left = '50%';
       return;
     }
-    const { result, concertMidi, writtenMidi, cents, s, held } = data;
-    els.writtenNote.textContent = noteName(writtenMidi, s.accidentals);
+    const { result, concertMidi, writtenMidi, cents, held } = data;
+    els.writtenNote.textContent = visualNoteName(noteName(writtenMidi, s.accidentals));
     const mode = held ? ' · retenida' : '';
-    els.concertNote.textContent = `sonido real: ${noteName(concertMidi, s.accidentals)} · ${result.freq.toFixed(1)} Hz${mode}`;
-    const pos = clamp(50 + cents, 0, 100);
+    els.concertNote.textContent = `sonido real: ${visualNoteName(noteName(concertMidi, s.accidentals))} · ${(result.freq || state.lastStableData?.result?.freq || 0).toFixed(1)} Hz${mode}`;
+    const pos = clamp(50 + (cents / range) * 50, 0, 100);
     els.needle.style.left = `${pos}%`;
     let label = `${cents >= 0 ? '+' : ''}${cents.toFixed(0)} cents`;
-    if (Math.abs(cents) <= 8) label += ' · centrado';
+    const centered = Math.max(5, Math.round(range * 0.18));
+    if (Math.abs(cents) <= centered) label += ' · centrado';
     else if (cents < 0) label += ' · grave';
     else label += ' · agudo';
     if (held) label += ' · señal inestable, mantengo nota';
     els.centsText.textContent = label;
+  }
+
+  function updateBeatIndicator(force = false) {
+    if (!els.beatIndicator) return;
+    const s = settings();
+    const beats = s.beatsPerBar;
+    if (force || els.beatIndicator.children.length !== beats) {
+      els.beatIndicator.innerHTML = '';
+      for (let i = 0; i < beats; i++) {
+        const dot = document.createElement('div');
+        dot.className = 'beatDot';
+        dot.textContent = String(i + 1);
+        els.beatIndicator.appendChild(dot);
+      }
+    }
+    const beatSec = 60 / s.bpm;
+    let active = -1;
+    if (state.isRecording && !state.isPaused) active = Math.floor(activeElapsed() / beatSec) % beats;
+    [...els.beatIndicator.children].forEach((dot, i) => dot.classList.toggle('active', i === active));
   }
 
   async function beep(time = 0, freq = 880, duration = .04, gain = .09) {
@@ -768,13 +846,34 @@
   }
 
   function buildBars(events) {
+    const s = settings();
+    const beatsPerBar = s.beatsPerBar || 4;
     const map = new Map();
     for (const ev of events) {
-      const idx = ev.barIndex || 0;
-      if (!map.has(idx)) map.set(idx, []);
-      map.get(idx).push(ev);
+      let remaining = Math.max(0.05, ev.durationBeats || 0);
+      let startBeat = ev.startBeat || 0;
+      let first = true;
+      while (remaining > 0.05) {
+        const idx = Math.floor(startBeat / beatsPerBar);
+        const beatInBar = ((startBeat % beatsPerBar) + beatsPerBar) % beatsPerBar;
+        const available = Math.max(0.05, beatsPerBar - beatInBar);
+        const dur = Math.min(remaining, available);
+        if (!map.has(idx)) map.set(idx, []);
+        map.get(idx).push({
+          ...ev,
+          startBeat: Number(startBeat.toFixed(3)),
+          beatInBar: Number(beatInBar.toFixed(3)),
+          durationBeats: Number(dur.toFixed(3)),
+          continuation: !first,
+        });
+        remaining = Number((remaining - dur).toFixed(3));
+        startBeat = Number((startBeat + dur).toFixed(3));
+        first = false;
+      }
     }
-    return [...map.entries()].sort((a, b) => a[0] - b[0]).map(([index, events]) => ({ index, events }));
+    return [...map.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([index, events]) => ({ index, events: events.sort((a, b) => a.beatInBar - b.beatInBar) }));
   }
 
   function barsToText(bars) {
@@ -800,32 +899,74 @@
       return;
     }
     renderStaff(analysis);
+    renderTimeline(analysis);
+    els.plainText.value = analysis.plain;
+  }
+
+  function renderTimeline(analysis) {
+    const s = settings();
+    els.bars.innerHTML = '';
+    const wrap = document.createElement('div');
+    wrap.className = 'timeline';
     for (const bar of analysis.bars) {
       const row = document.createElement('div');
-      row.className = 'bar';
-      const title = document.createElement('div');
-      title.className = 'barTitle';
-      title.textContent = `Compás ${bar.index + 1}`;
-      const tokens = document.createElement('div');
-      tokens.className = 'tokens';
-      for (const ev of bar.events) {
-        const token = document.createElement('div');
-        token.className = `token ${ev.label === 'REST' ? 'rest' : ''}`;
-        const n = document.createElement('div');
-        n.className = 'n';
-        n.textContent = ev.label === 'REST' ? 'silencio' : ev.label;
-        const d = document.createElement('div');
-        d.className = 'd';
-        const cents = ev.centsAvg !== null && ev.centsAvg !== undefined ? ` · ${ev.centsAvg >= 0 ? '+' : ''}${ev.centsAvg}c` : '';
-        const held = ev.heldFrameCount ? ' · retenida' : '';
-        d.textContent = `${durationLabel(ev.durationBeats)}${cents}${held}`;
-        token.append(n, d);
-        tokens.appendChild(token);
+      row.className = 'timelineBar';
+      const header = document.createElement('div');
+      header.className = 'timelineHeader';
+      header.textContent = `${bar.index + 1}`;
+      const lane = document.createElement('div');
+      lane.className = 'timelineLane';
+      lane.style.setProperty('--beats', s.beatsPerBar);
+      for (let i = 0; i < s.beatsPerBar; i++) {
+        const beat = document.createElement('span');
+        beat.className = 'beatGrid';
+        beat.style.left = `${(i / s.beatsPerBar) * 100}%`;
+        lane.appendChild(beat);
       }
-      row.append(title, tokens);
-      els.bars.appendChild(row);
+      for (const ev of bar.events) {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = `eventBlock ${ev.label === 'REST' ? 'rest' : ''} ${durationClass(ev.durationBeats)}`;
+        const left = clamp((ev.beatInBar || 0) / s.beatsPerBar, 0, 1) * 100;
+        const width = clamp((ev.durationBeats || .25) / s.beatsPerBar, .04, 1) * 100;
+        item.style.left = `${left}%`;
+        item.style.width = `${Math.min(width, 100 - left)}%`;
+        const name = ev.label === 'REST' ? 'sil.' : visualNoteName(ev.label);
+        const cents = ev.centsAvg !== null && ev.centsAvg !== undefined ? ` · ${ev.centsAvg >= 0 ? '+' : ''}${ev.centsAvg}c` : '';
+        item.innerHTML = `<span class="eventName">${escapeHtml(name)}</span><span class="eventDur">${durationGlyph(ev.durationBeats)} ${escapeHtml(durationLabel(ev.durationBeats))}</span>`;
+        item.title = `${bar.index + 1}.${Number((ev.beatInBar + 1).toFixed(2))} · ${name} · ${durationLabel(ev.durationBeats)}${cents}`;
+        item.addEventListener('click', () => {
+          appendEditHint(bar.index + 1, ev);
+        });
+        lane.appendChild(item);
+      }
+      row.append(header, lane);
+      wrap.appendChild(row);
     }
-    els.plainText.value = analysis.plain;
+    els.bars.appendChild(wrap);
+  }
+
+  function appendEditHint(barNumber, ev) {
+    const label = ev.label === 'REST' ? 'silencio' : ev.label;
+    const hint = `
+# revisar compás ${barNumber}, pulso ${Number((ev.beatInBar + 1).toFixed(2))}: ${label} ${durationLabel(ev.durationBeats)}`;
+    if (!els.plainText.value.includes(hint.trim())) els.plainText.value += hint;
+  }
+
+  function durationClass(beats) {
+    if (beats >= 3.8) return 'whole';
+    if (beats >= 1.8) return 'half';
+    if (beats >= .9) return 'quarter';
+    if (beats >= .45) return 'eighth';
+    return 'sixteenth';
+  }
+
+  function durationGlyph(beats) {
+    if (beats >= 3.8) return '𝅝';
+    if (beats >= 1.8) return '𝅗𝅥';
+    if (beats >= .9) return '♩';
+    if (beats >= .45) return '♪';
+    return '♬';
   }
 
   function renderStaff(analysis) {
@@ -869,7 +1010,7 @@
         svg += ledgerLinesFor(y, x, staffTop, staffBottom, lineGap);
         svg += `<ellipse class="noteHead" cx="${x}" cy="${y}" rx="7.2" ry="5.1" transform="rotate(-18 ${x} ${y})" />`;
         svg += `<line class="staffLine" x1="${x + 7}" y1="${y}" x2="${x + 7}" y2="${Math.min(y + 34, staffBottom + 30)}" />`;
-        svg += `<text class="noteLabel" x="${x - 15}" y="${staffBottom + 30}">${escapeHtml(ev.label)}</text>`;
+        svg += `<text class="noteLabel" x="${x - 15}" y="${staffBottom + 30}">${escapeHtml(visualNoteName(ev.label))}</text>`;
       }
     }
     svg += '</svg>';
@@ -946,6 +1087,88 @@
     await navigator.clipboard.writeText(text);
   }
 
+  function exportBaseName() {
+    return state.sessionId || `transcriptor-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`;
+  }
+
+  function csvFromAnalysis(analysis) {
+    if (!analysis?.bars?.length) return 'bar,beat,note,duration,durationBeats,midi,centsAvg,clarityAvg\n';
+    const rows = ['bar,beat,note,duration,durationBeats,midi,centsAvg,clarityAvg'];
+    for (const bar of analysis.bars) {
+      for (const ev of bar.events) {
+        rows.push([
+          bar.index + 1,
+          Number((ev.beatInBar + 1).toFixed(3)),
+          ev.label === 'REST' ? 'silencio' : ev.label,
+          durationLabel(ev.durationBeats),
+          ev.durationBeats,
+          ev.midi ?? '',
+          ev.centsAvg ?? '',
+          ev.clarityAvg ?? '',
+        ].map(csvEscape).join(','));
+      }
+    }
+    return rows.join('\n') + '\n';
+  }
+
+  function csvEscape(v) {
+    const str = String(v);
+    return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+  }
+
+  function musicXmlFromAnalysis(analysis) {
+    const s = settings();
+    const divisions = 4; // negra = 4, corchea = 2, semicorchea = 1
+    const measures = analysis?.bars || [];
+    const title = 'Transcriptor';
+    let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
+    xml += `<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">\n`;
+    xml += `<score-partwise version="3.1">\n  <work><work-title>${escapeXml(title)}</work-title></work>\n`;
+    xml += `  <part-list><score-part id="P1"><part-name>Trompeta en Sib</part-name></score-part></part-list>\n  <part id="P1">\n`;
+    for (let i = 0; i < measures.length; i++) {
+      const bar = measures[i];
+      xml += `    <measure number="${bar.index + 1}">\n`;
+      if (i === 0) {
+        xml += `      <attributes><divisions>${divisions}</divisions><key><fifths>0</fifths></key><time><beats>${s.beatsPerBar}</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>\n`;
+      }
+      for (const ev of bar.events) {
+        const dur = Math.max(1, Math.round((ev.durationBeats || .25) * divisions));
+        const type = xmlType(ev.durationBeats || .25);
+        if (ev.label === 'REST') {
+          xml += `      <note><rest/><duration>${dur}</duration><type>${type}</type></note>\n`;
+        } else {
+          const pitch = pitchForXml(ev.midi, s.accidentals);
+          xml += `      <note><pitch><step>${pitch.step}</step>${pitch.alter !== 0 ? `<alter>${pitch.alter}</alter>` : ''}<octave>${pitch.octave}</octave></pitch><duration>${dur}</duration><type>${type}</type></note>\n`;
+        }
+      }
+      xml += `    </measure>\n`;
+    }
+    xml += `  </part>\n</score-partwise>\n`;
+    return xml;
+  }
+
+  function pitchForXml(midi, accidentals) {
+    const rounded = Math.round(midi || 60);
+    const octave = Math.floor(rounded / 12) - 1;
+    const pc = ((rounded % 12) + 12) % 12;
+    const sharpMap = [ ['C',0], ['C',1], ['D',0], ['D',1], ['E',0], ['F',0], ['F',1], ['G',0], ['G',1], ['A',0], ['A',1], ['B',0] ];
+    const flatMap  = [ ['C',0], ['D',-1], ['D',0], ['E',-1], ['E',0], ['F',0], ['G',-1], ['G',0], ['A',-1], ['A',0], ['B',-1], ['B',0] ];
+    const [step, alter] = (accidentals === 'sharps' ? sharpMap : flatMap)[pc];
+    return { step, alter, octave };
+  }
+
+  function xmlType(beats) {
+    if (beats >= 3.75) return 'whole';
+    if (beats >= 1.75) return 'half';
+    if (beats >= .75) return 'quarter';
+    if (beats >= .375) return 'eighth';
+    return '16th';
+  }
+
+  function escapeXml(str) {
+    return String(str).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[ch]));
+  }
+
   els.tunerBtn.addEventListener('click', activateTuner);
   els.recordBtn.addEventListener('click', startRecording);
   els.pauseBtn.addEventListener('click', pauseResume);
@@ -957,10 +1180,25 @@
     setStatus('Transcripción copiada.');
   });
 
+  els.downloadTxt.addEventListener('click', () => {
+    const text = els.plainText.value || '';
+    download(`${exportBaseName()}-transcripcion.txt`, new Blob([text], { type: 'text/plain;charset=utf-8' }));
+  });
+
+  els.downloadCsv.addEventListener('click', () => {
+    const csv = csvFromAnalysis(state.lastAnalysis);
+    download(`${exportBaseName()}-transcripcion.csv`, new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  });
+
+  els.downloadMusicXml.addEventListener('click', () => {
+    const xml = musicXmlFromAnalysis(state.lastAnalysis || { bars: [] });
+    download(`${exportBaseName()}-transcripcion.musicxml`, new Blob([xml], { type: 'application/vnd.recordare.musicxml+xml;charset=utf-8' }));
+  });
+
   els.downloadJson.addEventListener('click', () => {
     const report = buildReport(true);
     const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
-    download(`${state.sessionId || 'transcriptor'}-report.json`, blob);
+    download(`${exportBaseName()}-report.json`, blob);
   });
 
   els.downloadAudio.addEventListener('click', () => {
@@ -984,6 +1222,10 @@
     state.lastAnalysis = null;
     els.debugOutput.textContent = 'Limpio.';
   });
+
+  [els.beatsPerBar, els.bpm].forEach(el => el.addEventListener('input', () => updateBeatIndicator(true)));
+  [els.pitchTolerance, els.accidentals, els.micSensitivity].forEach(el => el?.addEventListener('change', () => updateTuner(state.lastStableData, null, settings())));
+  updateBeatIndicator(true);
 
   document.addEventListener('keydown', (ev) => {
     if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'd') {
