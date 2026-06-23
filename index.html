@@ -3,16 +3,16 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Matching Transcriptor · Trompeta Sib</title>
+  <title>Transcriptor · Trompeta Sib</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <main class="app">
     <header class="hero">
       <div>
-        <p class="eyebrow">matching transcriptor</p>
-        <h1>Trompeta Sib · memoria melódica</h1>
-        <p class="lead">Graba una idea, mira la afinación, divide por compases y genera una transcripción aproximada editable.</p>
+        <p class="eyebrow">transcriptor</p>
+        <h1>Transcriptor · Trompeta Sib</h1>
+        <p class="lead">Afinador permanente, grabación con pausa y transcripción aproximada en compases y pentagrama.</p>
       </div>
       <button id="debugToggle" class="ghost small" title="También Ctrl+D">Consola técnica</button>
     </header>
@@ -91,12 +91,21 @@
               <option value="0">Libre</option>
             </select>
           </label>
+          <label>Retención afinador
+            <select id="holdNoteMs">
+              <option value="1200">Corta</option>
+              <option value="3500">Media</option>
+              <option value="7000" selected>Larga</option>
+              <option value="12000">Muy larga</option>
+            </select>
+          </label>
         </div>
       </div>
 
       <div class="block transport">
         <h2>Grabación</h2>
         <div class="buttons">
+          <button id="tunerBtn" class="secondary">Activar afinador</button>
           <button id="recordBtn" class="primary">Grabar</button>
           <button id="pauseBtn" class="secondary" disabled>Pausa</button>
           <button id="stopBtn" class="danger" disabled>Stop</button>
@@ -135,6 +144,7 @@
           <button id="downloadAudio" class="secondary" disabled>Audio</button>
         </div>
       </div>
+      <div id="staff" class="staff empty">El pentagrama aparecerá después de grabar.</div>
       <div id="bars" class="bars empty">Aún no hay transcripción.</div>
       <textarea id="plainText" spellcheck="false" placeholder="Aquí aparecerá la versión editable de la transcripción..."></textarea>
     </section>

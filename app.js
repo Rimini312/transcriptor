@@ -15,6 +15,8 @@
     pitchTolerance: $('pitchTolerance'),
     rhythmMode: $('rhythmMode'),
     quantize: $('quantize'),
+    holdNoteMs: $('holdNoteMs'),
+    tunerBtn: $('tunerBtn'),
     recordBtn: $('recordBtn'),
     pauseBtn: $('pauseBtn'),
     stopBtn: $('stopBtn'),
@@ -23,6 +25,7 @@
     concertNote: $('concertNote'),
     needle: $('needle'),
     centsText: $('centsText'),
+    staff: $('staff'),
     bars: $('bars'),
     plainText: $('plainText'),
     copyText: $('copyText'),
@@ -39,6 +42,8 @@
     sharps: ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'],
     flats: ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'],
   };
+
+  const letterIndex = { C: 0, D: 1, E: 2, F: 3, G: 4, A: 5, B: 6 };
 
   const state = {
     audioContext: null,
@@ -58,6 +63,11 @@
     lastAnalysis: null,
     metronomeTimer: null,
     sessionId: null,
+    debugLines: [],
+    pitchLoopStarted: false,
+    lastStableData: null,
+    lastStableAt: 0,
+    lastDisplayedHeld: false,
   };
 
   function settings() {
@@ -70,8 +80,13 @@
       pitchTolerance: Number(els.pitchTolerance.value) || 30,
       rhythmMode: els.rhythmMode.value,
       quantize: els.quantize.value,
+      holdNoteMs: Number(els.holdNoteMs.value) || 7000,
       countIn: els.countIn.checked,
       metronome: els.metronome.checked,
+      minConcertFreq: 135,
+      maxConcertFreq: 1200,
+      minWrittenMidi: 53, // F3 escrito aprox: evita falsos graves tipo F2
+      maxWrittenMidi: 88,
     };
   }
 
@@ -88,11 +103,8 @@
     return 69 + 12 * Math.log2(freq / a4);
   }
 
-  function freqFromMidi(midi, a4) {
-    return a4 * Math.pow(2, (midi - 69) / 12);
-  }
-
   function noteName(midi, accidentals = 'flats') {
+    if (midi === null || midi === undefined || !Number.isFinite(midi)) return 'REST';
     const rounded = Math.round(midi);
     const octave = Math.floor(rounded / 12) - 1;
     const pc = ((rounded % 12) + 12) % 12;
@@ -119,12 +131,9 @@
 
   function logDebug(line) {
     const stamp = new Date().toLocaleTimeString();
-    if (!state.debugLines) state.debugLines = [];
     state.debugLines.push(`[${stamp}] ${line}`);
-    if (state.debugLines.length > 180) state.debugLines.shift();
-    if (!state.lastAnalysis) {
-      els.debugOutput.textContent = state.debugLines.join('\n');
-    }
+    if (state.debugLines.length > 220) state.debugLines.shift();
+    if (!state.lastAnalysis) els.debugOutput.textContent = state.debugLines.join('\n') || 'Sin datos todavía.';
   }
 
   function updateDebugFull() {
@@ -133,87 +142,96 @@
   }
 
   function buildReport(full = true) {
-    const s = settings();
     const analysis = state.lastAnalysis || null;
     const payload = {
-      app: 'matching-transcriptor-v0.1',
+      app: 'transcriptor-v0.2',
       sessionId: state.sessionId,
       generatedAt: new Date().toISOString(),
-      settings: s,
+      settings: settings(),
       summary: analysis ? analysis.summary : null,
       transcriptionText: els.plainText.value || '',
       analysis,
     };
     if (!full && payload.analysis?.rawFrames) {
-      payload.analysis = { ...payload.analysis, rawFrames: payload.analysis.rawFrames.slice(-80) };
-      payload.note = 'rawFrames recortado a los últimos 80 frames en esta vista';
+      payload.analysis = { ...payload.analysis, rawFrames: payload.analysis.rawFrames.slice(-100) };
+      payload.note = 'rawFrames recortado a los últimos 100 frames en esta vista';
     }
     return payload;
   }
 
-  function autoCorrelate(buffer, sampleRate) {
+  function autoCorrelate(buffer, sampleRate, opts = {}) {
     const size = buffer.length;
+    let mean = 0;
+    for (let i = 0; i < size; i++) mean += buffer[i];
+    mean /= size;
+
     let rms = 0;
-    for (let i = 0; i < size; i++) rms += buffer[i] * buffer[i];
+    const x = new Float32Array(size);
+    for (let i = 0; i < size; i++) {
+      const v = buffer[i] - mean;
+      x[i] = Math.abs(v) < 0.015 ? 0 : v; // quita parte del ruido bajo sin matar la nota
+      rms += v * v;
+    }
     rms = Math.sqrt(rms / size);
-    if (rms < 0.012) return { freq: null, rms, clarity: 0 };
+    if (rms < 0.0055) return { freq: null, rms, clarity: 0 };
 
-    let start = 0;
-    let end = size - 1;
-    const threshold = 0.2;
-    for (let i = 0; i < size / 2; i++) {
-      if (Math.abs(buffer[i]) < threshold) { start = i; break; }
-    }
-    for (let i = 1; i < size / 2; i++) {
-      if (Math.abs(buffer[size - i]) < threshold) { end = size - i; break; }
-    }
+    const minFreq = opts.minFreq || 135;
+    const maxFreq = opts.maxFreq || 1200;
+    const minLag = Math.max(2, Math.floor(sampleRate / maxFreq));
+    const maxLag = Math.min(size - 2, Math.ceil(sampleRate / minFreq));
 
-    const trimmed = buffer.slice(start, end);
-    const len = trimmed.length;
-    if (len < 32) return { freq: null, rms, clarity: 0 };
+    let bestLag = -1;
+    let bestCorr = -Infinity;
+    const correlations = [];
 
-    const correlations = new Array(len).fill(0);
-    for (let lag = 0; lag < len; lag++) {
-      let sum = 0;
-      for (let i = 0; i < len - lag; i++) {
-        sum += trimmed[i] * trimmed[i + lag];
+    for (let lag = minLag; lag <= maxLag; lag++) {
+      let sum = 0, e1 = 0, e2 = 0;
+      for (let i = 0; i < size - lag; i++) {
+        const a = x[i];
+        const b = x[i + lag];
+        sum += a * b;
+        e1 += a * a;
+        e2 += b * b;
       }
-      correlations[lag] = sum;
-    }
-
-    let d = 0;
-    while (d < len - 1 && correlations[d] > correlations[d + 1]) d++;
-
-    let maxVal = -Infinity;
-    let maxPos = -1;
-    const minLag = Math.floor(sampleRate / 1200);
-    const maxLag = Math.floor(sampleRate / 70);
-    for (let i = Math.max(d, minLag); i < Math.min(maxLag, len); i++) {
-      if (correlations[i] > maxVal) {
-        maxVal = correlations[i];
-        maxPos = i;
+      const corr = sum / Math.sqrt((e1 || 1e-12) * (e2 || 1e-12));
+      correlations[lag] = corr;
+      if (corr > bestCorr) {
+        bestCorr = corr;
+        bestLag = lag;
       }
     }
 
-    if (maxPos <= 0) return { freq: null, rms, clarity: 0 };
+    if (bestLag <= 0 || bestCorr < 0.43) return { freq: null, rms, clarity: Math.max(0, bestCorr || 0) };
 
-    const x1 = correlations[maxPos - 1] || 0;
-    const x2 = correlations[maxPos] || 0;
-    const x3 = correlations[maxPos + 1] || 0;
+    // Corrección anti-subarmónicos: si hay un pico más corto casi igual de bueno, preferirlo.
+    for (let lag = minLag + 1; lag < bestLag; lag++) {
+      const c = correlations[lag] || 0;
+      const isPeak = c > (correlations[lag - 1] || 0) && c >= (correlations[lag + 1] || 0);
+      if (isPeak && c > bestCorr * 0.86 && c > 0.50) {
+        bestLag = lag;
+        bestCorr = c;
+        break;
+      }
+    }
+
+    const x1 = correlations[bestLag - 1] || 0;
+    const x2 = correlations[bestLag] || 0;
+    const x3 = correlations[bestLag + 1] || 0;
     const a = (x1 + x3 - 2 * x2) / 2;
     const b = (x3 - x1) / 2;
-    const refined = a ? maxPos - b / (2 * a) : maxPos;
+    const refined = a ? bestLag - b / (2 * a) : bestLag;
     const freq = sampleRate / refined;
-    const clarity = clamp(maxVal / (correlations[0] || 1), 0, 1);
+    const clarity = clamp(bestCorr, 0, 1);
 
-    if (!Number.isFinite(freq) || freq < 70 || freq > 1200 || clarity < .36) {
-      return { freq: null, rms, clarity };
-    }
+    if (!Number.isFinite(freq) || freq < minFreq || freq > maxFreq) return { freq: null, rms, clarity };
     return { freq, rms, clarity };
   }
 
   async function ensureAudio() {
     if (state.stream) return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('Este navegador no expone getUserMedia. Prueba Chrome/Edge/Firefox en HTTPS.');
+    }
     state.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: false,
@@ -224,14 +242,19 @@
     state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
     const source = state.audioContext.createMediaStreamSource(state.stream);
     state.analyser = state.audioContext.createAnalyser();
-    state.analyser.fftSize = 4096;
+    state.analyser.fftSize = 8192;
     state.analyser.smoothingTimeConstant = 0;
     source.connect(state.analyser);
-    setStatus('Micrófono activo. Listo para grabar.');
-    requestAnimationFrame(pitchLoop);
+    els.tunerBtn.textContent = 'Afinador activo';
+    els.tunerBtn.disabled = true;
+    setStatus('Afinador activo. Puedes tocar sin grabar o empezar una toma.');
+    if (!state.pitchLoopStarted) {
+      state.pitchLoopStarted = true;
+      requestAnimationFrame(pitchLoop);
+    }
   }
 
-  function pitchLoop(now) {
+  function pitchLoop(now = performance.now()) {
     if (!state.analyser || !state.audioContext) {
       requestAnimationFrame(pitchLoop);
       return;
@@ -239,8 +262,11 @@
 
     const buffer = new Float32Array(state.analyser.fftSize);
     state.analyser.getFloatTimeDomainData(buffer);
-    const result = autoCorrelate(buffer, state.audioContext.sampleRate);
     const s = settings();
+    const result = autoCorrelate(buffer, state.audioContext.sampleRate, { minFreq: s.minConcertFreq, maxFreq: s.maxConcertFreq });
+
+    let data = null;
+    let held = false;
 
     if (result.freq) {
       const concertFloat = midiFloatFromFreq(result.freq, s.a4);
@@ -248,44 +274,73 @@
       const writtenFloat = concertFloat + s.transposeSemitones;
       const writtenMidi = Math.round(writtenFloat);
       const cents = (writtenFloat - writtenMidi) * 100;
-      updateTuner({ result, concertMidi, writtenMidi, cents, s });
+      const inRange = writtenMidi >= s.minWrittenMidi && writtenMidi <= s.maxWrittenMidi;
+      const notWild = Math.abs(cents) <= Math.max(78, s.pitchTolerance + 32);
 
-      if (state.isRecording && !state.isPaused && now - state.lastPitchAt > 42) {
-        state.lastPitchAt = now;
-        state.pitchFrames.push({
-          t: Number(activeElapsed().toFixed(4)),
-          freq: Number(result.freq.toFixed(2)),
-          rms: Number(result.rms.toFixed(4)),
-          clarity: Number(result.clarity.toFixed(3)),
-          concertMidi,
-          concertNote: noteName(concertMidi, s.accidentals),
-          writtenMidi,
-          writtenNote: noteName(writtenMidi, s.accidentals),
-          cents: Number(cents.toFixed(1)),
-        });
+      if (inRange && notWild) {
+        data = { result, concertMidi, writtenMidi, cents, s, held: false };
+        state.lastStableData = data;
+        state.lastStableAt = now;
       }
-    } else {
-      updateTuner(null);
-      if (state.isRecording && !state.isPaused && now - state.lastPitchAt > 58) {
-        state.lastPitchAt = now;
-        state.pitchFrames.push({
-          t: Number(activeElapsed().toFixed(4)),
-          freq: null,
-          rms: Number(result.rms.toFixed(4)),
-          clarity: Number(result.clarity.toFixed(3)),
-          concertMidi: null,
-          concertNote: 'REST',
-          writtenMidi: null,
-          writtenNote: 'REST',
-          cents: null,
-        });
+    }
+
+    if (!data && state.lastStableData) {
+      const age = now - state.lastStableAt;
+      const stillSound = result.rms > 0.010;
+      if (age <= s.holdNoteMs && stillSound) {
+        data = {
+          ...state.lastStableData,
+          result: { ...state.lastStableData.result, rms: result.rms, clarity: result.clarity || state.lastStableData.result.clarity },
+          held: true,
+        };
+        held = true;
       }
+    }
+
+    updateTuner(data);
+
+    if (state.isRecording && !state.isPaused && now - state.lastPitchAt > 42) {
+      state.lastPitchAt = now;
+      if (data) pushPitchFrame(data, held);
+      else pushRestFrame(result);
     }
 
     requestAnimationFrame(pitchLoop);
   }
 
+  function pushPitchFrame(data, held = false) {
+    const { result, concertMidi, writtenMidi, cents, s } = data;
+    state.pitchFrames.push({
+      t: Number(activeElapsed().toFixed(4)),
+      freq: Number(result.freq.toFixed(2)),
+      rms: Number(result.rms.toFixed(4)),
+      clarity: Number(result.clarity.toFixed(3)),
+      concertMidi,
+      concertNote: noteName(concertMidi, s.accidentals),
+      writtenMidi,
+      writtenNote: noteName(writtenMidi, s.accidentals),
+      cents: Number(cents.toFixed(1)),
+      held,
+    });
+  }
+
+  function pushRestFrame(result) {
+    state.pitchFrames.push({
+      t: Number(activeElapsed().toFixed(4)),
+      freq: null,
+      rms: Number(result.rms.toFixed(4)),
+      clarity: Number((result.clarity || 0).toFixed(3)),
+      concertMidi: null,
+      concertNote: 'REST',
+      writtenMidi: null,
+      writtenNote: 'REST',
+      cents: null,
+      held: false,
+    });
+  }
+
   function updateTuner(data) {
+    document.body.classList.toggle('held-note', Boolean(data?.held));
     if (!data) {
       els.writtenNote.textContent = '—';
       els.concertNote.textContent = 'sonido real: —';
@@ -293,15 +348,17 @@
       els.needle.style.left = '50%';
       return;
     }
-    const { result, concertMidi, writtenMidi, cents, s } = data;
+    const { result, concertMidi, writtenMidi, cents, s, held } = data;
     els.writtenNote.textContent = noteName(writtenMidi, s.accidentals);
-    els.concertNote.textContent = `sonido real: ${noteName(concertMidi, s.accidentals)} · ${result.freq.toFixed(1)} Hz`;
+    const mode = held ? ' · retenida' : '';
+    els.concertNote.textContent = `sonido real: ${noteName(concertMidi, s.accidentals)} · ${result.freq.toFixed(1)} Hz${mode}`;
     const pos = clamp(50 + cents, 0, 100);
     els.needle.style.left = `${pos}%`;
     let label = `${cents >= 0 ? '+' : ''}${cents.toFixed(0)} cents`;
     if (Math.abs(cents) <= 8) label += ' · centrado';
     else if (cents < 0) label += ' · grave';
     else label += ' · agudo';
+    if (held) label += ' · señal inestable, mantengo nota';
     els.centsText.textContent = label;
   }
 
@@ -351,10 +408,20 @@
 
   function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
-  async function startRecording() {
+  async function activateTuner() {
     try {
       await ensureAudio();
       if (state.audioContext.state === 'suspended') await state.audioContext.resume();
+    } catch (err) {
+      console.error(err);
+      setStatus(`Error con el micrófono: ${err.message}`);
+      throw err;
+    }
+  }
+
+  async function startRecording() {
+    try {
+      await activateTuner();
       await runCountIn();
 
       state.sessionId = `session-${Date.now()}`;
@@ -364,6 +431,8 @@
       state.lastAnalysis = null;
       state.debugLines = [];
       els.downloadAudio.disabled = true;
+      els.staff.classList.add('empty');
+      els.staff.textContent = 'Grabando...';
       els.bars.classList.add('empty');
       els.bars.textContent = 'Grabando...';
       els.plainText.value = '';
@@ -391,10 +460,10 @@
       els.pauseBtn.disabled = false;
       els.stopBtn.disabled = false;
       els.pauseBtn.textContent = 'Pausa';
-      setStatus('Grabando. Toca la idea; yo voy tomando datos.');
+      setStatus('Grabando. Toca la idea; el afinador sigue activo.');
     } catch (err) {
       console.error(err);
-      setStatus(`Error con el micrófono: ${err.message}`);
+      setStatus(`Error grabando: ${err.message}`);
     }
   }
 
@@ -443,14 +512,14 @@
 
   function minDurationByMode(mode) {
     if (mode === 'strict') return .07;
-    if (mode === 'loose') return .16;
-    return .11;
+    if (mode === 'loose') return .18;
+    return .12;
   }
 
   function silenceGapByMode(mode) {
-    if (mode === 'strict') return .08;
-    if (mode === 'loose') return .22;
-    return .14;
+    if (mode === 'strict') return .10;
+    if (mode === 'loose') return .34;
+    return .22;
   }
 
   function analyzeFrames(frames, s) {
@@ -460,21 +529,23 @@
     const beatSec = 60 / s.bpm;
     const barSec = beatSec * s.beatsPerBar;
 
-    const cleaned = rawFrames.map(f => {
-      if (!f.writtenMidi || Math.abs(f.cents || 0) > Math.max(75, s.pitchTolerance + 25)) {
-        return { ...f, label: 'REST', midi: null };
-      }
-      return { ...f, label: f.writtenNote, midi: f.writtenMidi };
+    const cleaned = smoothMidiFrames(rawFrames, s).map(f => {
+      const isNote = f.writtenMidi !== null && f.writtenMidi !== undefined;
+      const inRange = isNote && f.writtenMidi >= s.minWrittenMidi && f.writtenMidi <= s.maxWrittenMidi;
+      const inTuneEnough = isNote && Math.abs(f.cents || 0) <= Math.max(82, s.pitchTolerance + 38);
+      if (!inRange || !inTuneEnough) return { ...f, label: 'REST', midi: null };
+      return { ...f, label: noteName(f.writtenMidi, s.accidentals), midi: f.writtenMidi };
     });
 
     let segments = groupFrames(cleaned, silenceGap);
     segments = mergeTinySegments(segments, minDur);
     segments = mergeSameNeighbors(segments);
+    segments = absorbShortRestsBetweenSameNotes(segments, silenceGap * 1.6);
 
     const gridBeats = chooseGridBeats(segments, s);
     const quantized = quantizeSegments(segments, gridBeats, beatSec, barSec, s.beatsPerBar);
     const bars = buildBars(quantized);
-    const plain = barsToText(bars, s.beatsPerBar);
+    const plain = barsToText(bars);
 
     return {
       summary: {
@@ -486,6 +557,7 @@
         gridBeats,
         beatSec: Number(beatSec.toFixed(4)),
         barSec: Number(barSec.toFixed(4)),
+        heldFrameCount: rawFrames.filter(f => f.held).length,
       },
       rawFrames,
       segments,
@@ -493,6 +565,20 @@
       bars,
       plain,
     };
+  }
+
+  function smoothMidiFrames(frames, s) {
+    const out = frames.map(f => ({ ...f }));
+    const radius = s.rhythmMode === 'strict' ? 1 : 2;
+    for (let i = 0; i < out.length; i++) {
+      if (out[i].writtenMidi === null || out[i].writtenMidi === undefined) continue;
+      const window = [];
+      for (let j = Math.max(0, i - radius); j <= Math.min(out.length - 1, i + radius); j++) {
+        if (out[j].writtenMidi !== null && out[j].writtenMidi !== undefined) window.push(out[j].writtenMidi);
+      }
+      if (window.length >= 3) out[i].writtenMidi = Math.round(median(window));
+    }
+    return out;
   }
 
   function groupFrames(frames, silenceGap) {
@@ -514,7 +600,7 @@
         finalizeSegment(cur);
         segments.push(cur);
         if (gap > silenceGap && cur.label !== 'REST' && label !== 'REST') {
-          segments.push({ label: 'REST', midi: null, start: lastT, end: t, duration: t - lastT, centsAvg: null, clarityAvg: null, frameCount: 0 });
+          segments.push({ label: 'REST', midi: null, start: lastT, end: t, duration: t - lastT, centsAvg: null, clarityAvg: null, frameCount: 0, heldFrameCount: 0 });
         }
         cur = newSegment(label, f);
       } else {
@@ -544,9 +630,15 @@
     seg.end += frameDur;
     seg.duration = Math.max(0, seg.end - seg.start);
     const noteFrames = seg.frames.filter(f => f.label !== 'REST');
+    if (noteFrames.length) {
+      const midiMed = Math.round(median(noteFrames.map(f => f.midi ?? f.writtenMidi)));
+      seg.midi = midiMed;
+      seg.label = noteName(midiMed, settings().accidentals);
+    }
     seg.centsAvg = noteFrames.length ? Number(avg(noteFrames.map(f => f.cents || 0)).toFixed(1)) : null;
     seg.clarityAvg = noteFrames.length ? Number(avg(noteFrames.map(f => f.clarity || 0)).toFixed(3)) : null;
     seg.frameCount = seg.frames.length;
+    seg.heldFrameCount = noteFrames.filter(f => f.held).length;
     delete seg.frames;
     delete seg.lastT;
   }
@@ -564,7 +656,7 @@
       }
       out.push({ ...seg });
     }
-    return out.filter(seg => !(seg.label !== 'REST' && seg.duration < minDur * .65));
+    return out.filter(seg => !(seg.label !== 'REST' && seg.duration < minDur * .72));
   }
 
   function mergeSameNeighbors(segments) {
@@ -575,9 +667,28 @@
         prev.end = seg.end;
         prev.duration = prev.end - prev.start;
         if (prev.centsAvg !== null && seg.centsAvg !== null) prev.centsAvg = Number(((prev.centsAvg + seg.centsAvg) / 2).toFixed(1));
+        prev.heldFrameCount = (prev.heldFrameCount || 0) + (seg.heldFrameCount || 0);
         continue;
       }
       out.push({ ...seg });
+    }
+    return out;
+  }
+
+  function absorbShortRestsBetweenSameNotes(segments, maxRestDur) {
+    const out = [];
+    for (let i = 0; i < segments.length; i++) {
+      const a = out[out.length - 1];
+      const b = segments[i];
+      const c = segments[i + 1];
+      if (a && b && c && b.label === 'REST' && b.duration <= maxRestDur && a.label === c.label && a.label !== 'REST') {
+        a.end = c.end;
+        a.duration = a.end - a.start;
+        a.heldFrameCount = (a.heldFrameCount || 0) + (c.heldFrameCount || 0);
+        i++;
+        continue;
+      }
+      out.push({ ...b });
     }
     return out;
   }
@@ -600,14 +711,17 @@
     if (!gridBeats || gridBeats <= 0) {
       return segments.map(seg => ({
         label: seg.label,
+        midi: seg.midi,
         start: seg.start,
         end: seg.end,
         duration: seg.duration,
         startBeat: seg.start / beatSec,
         durationBeats: seg.duration / beatSec,
         barIndex: Math.floor(seg.start / barSec),
+        beatInBar: Number(((seg.start / beatSec) % beatsPerBar).toFixed(3)),
         centsAvg: seg.centsAvg,
         clarityAvg: seg.clarityAvg,
+        heldFrameCount: seg.heldFrameCount || 0,
       }));
     }
     const gridSec = gridBeats * beatSec;
@@ -620,6 +734,7 @@
       end = clamp(end, start + gridSec, maxEnd + gridSec);
       events.push({
         label: seg.label,
+        midi: seg.midi,
         start: Number(start.toFixed(4)),
         end: Number(end.toFixed(4)),
         duration: Number((end - start).toFixed(4)),
@@ -629,6 +744,7 @@
         beatInBar: Number(((start / beatSec) % beatsPerBar).toFixed(3)),
         centsAvg: seg.centsAvg,
         clarityAvg: seg.clarityAvg,
+        heldFrameCount: seg.heldFrameCount || 0,
       });
     }
     return mergeQuantized(events);
@@ -643,6 +759,7 @@
         prev.end = ev.end;
         prev.duration = Number((prev.end - prev.start).toFixed(4));
         prev.durationBeats = Number((prev.durationBeats + ev.durationBeats).toFixed(3));
+        prev.heldFrameCount = (prev.heldFrameCount || 0) + (ev.heldFrameCount || 0);
       } else {
         out.push({ ...ev });
       }
@@ -675,11 +792,14 @@
     els.bars.classList.remove('empty');
     els.bars.innerHTML = '';
     if (!analysis.bars.length) {
+      els.staff.classList.add('empty');
+      els.staff.textContent = 'No hay notas para pentagrama.';
       els.bars.classList.add('empty');
       els.bars.textContent = 'No se detectaron notas estables.';
       els.plainText.value = '';
       return;
     }
+    renderStaff(analysis);
     for (const bar of analysis.bars) {
       const row = document.createElement('div');
       row.className = 'bar';
@@ -697,7 +817,8 @@
         const d = document.createElement('div');
         d.className = 'd';
         const cents = ev.centsAvg !== null && ev.centsAvg !== undefined ? ` · ${ev.centsAvg >= 0 ? '+' : ''}${ev.centsAvg}c` : '';
-        d.textContent = `${durationLabel(ev.durationBeats)}${cents}`;
+        const held = ev.heldFrameCount ? ' · retenida' : '';
+        d.textContent = `${durationLabel(ev.durationBeats)}${cents}${held}`;
         token.append(n, d);
         tokens.appendChild(token);
       }
@@ -705,6 +826,85 @@
       els.bars.appendChild(row);
     }
     els.plainText.value = analysis.plain;
+  }
+
+  function renderStaff(analysis) {
+    const bars = analysis.bars;
+    const beatsPerBar = settings().beatsPerBar;
+    const barW = 190;
+    const left = 42;
+    const right = 24;
+    const top = 38;
+    const lineGap = 10;
+    const staffTop = top + 22;
+    const staffBottom = staffTop + lineGap * 4;
+    const h = 128;
+    const w = Math.max(760, left + right + bars.length * barW);
+    const totalBars = bars.length;
+
+    let svg = `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Pentagrama aproximado">`;
+    for (let i = 0; i < 5; i++) {
+      const y = staffTop + i * lineGap;
+      svg += `<line class="staffLine" x1="${left}" y1="${y}" x2="${w - right}" y2="${y}" />`;
+    }
+    svg += `<text x="12" y="${staffTop + 28}" class="noteLabel">𝄞</text>`;
+
+    for (let b = 0; b <= totalBars; b++) {
+      const x = left + b * barW;
+      svg += `<line class="barLine" x1="${x}" y1="${staffTop - 8}" x2="${x}" y2="${staffBottom + 8}" />`;
+      if (b < totalBars) svg += `<text class="barNumber" x="${x + 6}" y="22">${bars[b].index + 1}</text>`;
+    }
+
+    for (let bi = 0; bi < bars.length; bi++) {
+      const bar = bars[bi];
+      const barX = left + bi * barW;
+      for (const ev of bar.events) {
+        const x = barX + 18 + clamp((ev.beatInBar || 0) / beatsPerBar, 0, .95) * (barW - 34);
+        if (ev.label === 'REST') {
+          svg += `<rect class="restMark" x="${x - 5}" y="${staffTop + 16}" width="10" height="8" rx="2" />`;
+          svg += `<text x="${x - 11}" y="${staffBottom + 30}">sil.</text>`;
+          continue;
+        }
+        const y = yForMidiOnTreble(ev.midi, staffBottom, lineGap);
+        svg += ledgerLinesFor(y, x, staffTop, staffBottom, lineGap);
+        svg += `<ellipse class="noteHead" cx="${x}" cy="${y}" rx="7.2" ry="5.1" transform="rotate(-18 ${x} ${y})" />`;
+        svg += `<line class="staffLine" x1="${x + 7}" y1="${y}" x2="${x + 7}" y2="${Math.min(y + 34, staffBottom + 30)}" />`;
+        svg += `<text class="noteLabel" x="${x - 15}" y="${staffBottom + 30}">${escapeHtml(ev.label)}</text>`;
+      }
+    }
+    svg += '</svg>';
+    els.staff.classList.remove('empty');
+    els.staff.innerHTML = svg;
+  }
+
+  function yForMidiOnTreble(midi, staffBottom, lineGap) {
+    // En clave de sol, la línea inferior es E4. Cada paso diatónico sube medio espacio.
+    const rounded = Math.round(midi || 64);
+    const octave = Math.floor(rounded / 12) - 1;
+    const pcName = noteNames.sharps[((rounded % 12) + 12) % 12];
+    const letter = pcName[0];
+    const diatonic = octave * 7 + letterIndex[letter];
+    const e4 = 4 * 7 + letterIndex.E;
+    const steps = diatonic - e4;
+    return staffBottom - steps * (lineGap / 2);
+  }
+
+  function ledgerLinesFor(y, x, staffTop, staffBottom, lineGap) {
+    let out = '';
+    if (y < staffTop) {
+      for (let ly = staffTop - lineGap; ly >= y - 1; ly -= lineGap) {
+        out += `<line class="ledgerLine" x1="${x - 12}" y1="${ly}" x2="${x + 12}" y2="${ly}" />`;
+      }
+    } else if (y > staffBottom) {
+      for (let ly = staffBottom + lineGap; ly <= y + 1; ly += lineGap) {
+        out += `<line class="ledgerLine" x1="${x - 12}" y1="${ly}" x2="${x + 12}" y2="${ly}" />`;
+      }
+    }
+    return out;
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
   }
 
   function avg(arr) { return arr.reduce((a, b) => a + b, 0) / arr.length; }
@@ -746,6 +946,7 @@
     await navigator.clipboard.writeText(text);
   }
 
+  els.tunerBtn.addEventListener('click', activateTuner);
   els.recordBtn.addEventListener('click', startRecording);
   els.pauseBtn.addEventListener('click', pauseResume);
   els.stopBtn.addEventListener('click', stopRecording);
@@ -759,13 +960,13 @@
   els.downloadJson.addEventListener('click', () => {
     const report = buildReport(true);
     const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
-    download(`${state.sessionId || 'matching-transcriptor'}-report.json`, blob);
+    download(`${state.sessionId || 'transcriptor'}-report.json`, blob);
   });
 
   els.downloadAudio.addEventListener('click', () => {
     if (!state.audioBlob) return;
     const ext = state.audioBlob.type.includes('mp4') ? 'm4a' : 'webm';
-    download(`${state.sessionId || 'matching-transcriptor'}.${ext}`, state.audioBlob);
+    download(`${state.sessionId || 'transcriptor'}.${ext}`, state.audioBlob);
   });
 
   els.debugToggle.addEventListener('click', () => {
@@ -789,7 +990,7 @@
       ev.preventDefault();
       els.debugToggle.click();
     }
-    if (ev.code === 'Space' && document.activeElement.tagName !== 'TEXTAREA') {
+    if (ev.code === 'Space' && document.activeElement.tagName !== 'TEXTAREA' && document.activeElement.tagName !== 'INPUT') {
       ev.preventDefault();
       if (!state.isRecording) startRecording();
       else pauseResume();
