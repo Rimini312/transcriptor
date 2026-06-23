@@ -1,6 +1,9 @@
 (() => {
   'use strict';
 
+  const APP_VERSION = 'v0.3.1';
+  const APP_ID = `transcriptor-${APP_VERSION}`;
+
   const $ = (id) => document.getElementById(id);
 
   const els = {
@@ -30,6 +33,7 @@
     meterCenterLabel: $('meterCenterLabel'),
     meterRightLabel: $('meterRightLabel'),
     signalFill: $('signalFill'),
+    inputLevelText: $('inputLevelText'),
     beatIndicator: $('beatIndicator'),
     staff: $('staff'),
     bars: $('bars'),
@@ -78,6 +82,8 @@
     lastStableAt: 0,
     lastDisplayedHeld: false,
     beatTimerStarted: false,
+    beatStartAt: performance.now(),
+    audioReady: false,
   };
 
   function settings() {
@@ -127,10 +133,12 @@
   }
 
   function sensitivityProfile(value) {
-    if (value === 'low') return { zeroGate: 0.014, rmsFloor: 0.006, clarityMin: 0.47, holdRms: 0.0028 };
-    if (value === 'high') return { zeroGate: 0.005, rmsFloor: 0.0020, clarityMin: 0.34, holdRms: 0.0012 };
-    if (value === 'max') return { zeroGate: 0.0025, rmsFloor: 0.0010, clarityMin: 0.27, holdRms: 0.00045 };
-    return { zeroGate: 0.008, rmsFloor: 0.0030, clarityMin: 0.39, holdRms: 0.0018 };
+    // La v0.3 era demasiado agresiva: la puerta de ruido anulaba la onda y el afinador parecía sordo.
+    // En v0.3.1 la puerta casi desaparece; la sensibilidad se controla con rmsFloor/clarityMin.
+    if (value === 'low') return { zeroGate: 0.0008, rmsFloor: 0.0060, clarityMin: 0.50, holdRms: 0.0018, meterGain: 1.00 };
+    if (value === 'high') return { zeroGate: 0.00015, rmsFloor: 0.0013, clarityMin: 0.30, holdRms: 0.00035, meterGain: 2.20 };
+    if (value === 'max') return { zeroGate: 0.00000, rmsFloor: 0.00055, clarityMin: 0.22, holdRms: 0.00012, meterGain: 3.20 };
+    return { zeroGate: 0.00035, rmsFloor: 0.0023, clarityMin: 0.36, holdRms: 0.00075, meterGain: 1.55 };
   }
 
   function durationLabel(beats) {
@@ -166,7 +174,7 @@
   function buildReport(full = true) {
     const analysis = state.lastAnalysis || null;
     const payload = {
-      app: 'transcriptor-v0.3',
+      app: APP_ID,
       sessionId: state.sessionId,
       generatedAt: new Date().toISOString(),
       settings: settings(),
@@ -188,16 +196,19 @@
     mean /= size;
 
     let rms = 0;
+    let peak = 0;
     const x = new Float32Array(size);
     for (let i = 0; i < size; i++) {
       const v = buffer[i] - mean;
-      const zeroGate = opts.zeroGate ?? 0.008;
-      x[i] = Math.abs(v) < zeroGate ? 0 : v; // puerta de ruido ajustable
+      const av = Math.abs(v);
+      if (av > peak) peak = av;
+      const zeroGate = opts.zeroGate ?? 0.00035;
+      x[i] = av < zeroGate ? 0 : v; // puerta de ruido muy baja, no mata notas largas
       rms += v * v;
     }
     rms = Math.sqrt(rms / size);
     const rmsFloor = opts.rmsFloor ?? 0.003;
-    if (rms < rmsFloor) return { freq: null, rms, clarity: 0 };
+    if (rms < rmsFloor) return { freq: null, rms, peak, clarity: 0 };
 
     const minFreq = opts.minFreq || 135;
     const maxFreq = opts.maxFreq || 1200;
@@ -226,7 +237,7 @@
     }
 
     const clarityMin = opts.clarityMin ?? 0.39;
-    if (bestLag <= 0 || bestCorr < clarityMin) return { freq: null, rms, clarity: Math.max(0, bestCorr || 0) };
+    if (bestLag <= 0 || bestCorr < clarityMin) return { freq: null, rms, peak, clarity: Math.max(0, bestCorr || 0) };
 
     // Corrección anti-subarmónicos: si hay un pico más corto casi igual de bueno, preferirlo.
     for (let lag = minLag + 1; lag < bestLag; lag++) {
@@ -248,31 +259,67 @@
     const freq = sampleRate / refined;
     const clarity = clamp(bestCorr, 0, 1);
 
-    if (!Number.isFinite(freq) || freq < minFreq || freq > maxFreq) return { freq: null, rms, clarity };
-    return { freq, rms, clarity };
+    if (!Number.isFinite(freq) || freq < minFreq || freq > maxFreq) return { freq: null, rms, peak, clarity };
+    return { freq, rms, peak, clarity };
   }
 
   async function ensureAudio() {
-    if (state.stream) return;
     if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error('Este navegador no expone getUserMedia. Prueba Chrome/Edge/Firefox en HTTPS.');
+      throw new Error('Este navegador no expone getUserMedia. Usa la web publicada en HTTPS o localhost.');
     }
-    state.stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-      },
-    });
+
+    if (state.audioContext?.state === 'closed') {
+      state.audioContext = null;
+      state.analyser = null;
+      state.stream = null;
+      state.audioReady = false;
+    }
+
+    if (state.stream && state.audioContext && state.analyser) {
+      if (state.audioContext.state === 'suspended') await state.audioContext.resume();
+      state.audioReady = true;
+      startBeatLoop();
+      if (!state.pitchLoopStarted) {
+        state.pitchLoopStarted = true;
+        requestAnimationFrame(pitchLoop);
+      }
+      return;
+    }
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 1,
+        },
+      });
+    } catch (err) {
+      // Algunos móviles/navegadores se atragantan con restricciones finas. Fallback bruto: que entre señal y luego filtramos nosotros.
+      logDebug(`Fallback getUserMedia audio:true · ${err.message}`);
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    }
+
+    state.stream = stream;
     state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    if (state.audioContext.state === 'suspended') await state.audioContext.resume();
+
     const source = state.audioContext.createMediaStreamSource(state.stream);
     state.analyser = state.audioContext.createAnalyser();
-    state.analyser.fftSize = 16384;
+    state.analyser.fftSize = 8192;
     state.analyser.smoothingTimeConstant = 0;
     source.connect(state.analyser);
+
+    state.audioReady = true;
+    state.beatStartAt = performance.now();
     els.tunerBtn.textContent = 'Afinador activo';
     els.tunerBtn.disabled = true;
-    setStatus('Afinador activo. Puedes tocar sin grabar o empezar una toma.');
+    setStatus('Afinador activo. Entrada de micro conectada.');
+    logDebug(`Audio OK · sampleRate ${state.audioContext.sampleRate} · fftSize ${state.analyser.fftSize}`);
+
+    startBeatLoop();
     if (!state.pitchLoopStarted) {
       state.pitchLoopStarted = true;
       requestAnimationFrame(pitchLoop);
@@ -349,6 +396,7 @@
       t: Number(activeElapsed().toFixed(4)),
       freq: Number(result.freq.toFixed(2)),
       rms: Number(result.rms.toFixed(4)),
+      peak: Number((result.peak || 0).toFixed(4)),
       clarity: Number(result.clarity.toFixed(3)),
       concertMidi,
       concertNote: noteName(concertMidi, s.accidentals),
@@ -364,6 +412,7 @@
       t: Number(activeElapsed().toFixed(4)),
       freq: null,
       rms: Number(result.rms.toFixed(4)),
+      peak: Number((result.peak || 0).toFixed(4)),
       clarity: Number((result.clarity || 0).toFixed(3)),
       concertMidi: null,
       concertNote: 'REST',
@@ -381,11 +430,18 @@
     els.meterRightLabel.textContent = `+${range}`;
 
     const rms = liveResult?.rms ?? data?.result?.rms ?? 0;
+    const peak = liveResult?.peak ?? data?.result?.peak ?? rms;
     const clarity = liveResult?.clarity ?? data?.result?.clarity ?? 0;
+    const profile = sensitivityProfile(s.micSensitivity);
     if (els.signalFill) {
-      const signal = clamp((rms / 0.045) * 100, 0, 100);
+      const level = Math.max(rms * 1.6, peak * 0.72);
+      const signal = clamp((level / 0.050) * 100 * (profile.meterGain || 1), 0, 100);
       els.signalFill.style.width = `${signal}%`;
-      els.signalFill.style.opacity = `${clamp(0.25 + clarity * 0.75, 0.25, 1)}`;
+      els.signalFill.style.opacity = `${clamp(0.30 + clarity * 0.70, 0.30, 1)}`;
+      els.signalFill.classList.toggle('hot', signal > 82);
+    }
+    if (els.inputLevelText) {
+      els.inputLevelText.textContent = `Entrada: rms ${rms.toFixed(4)} · pico ${peak.toFixed(4)} · claridad ${clarity.toFixed(2)}`;
     }
 
     document.body.classList.toggle('held-note', Boolean(data?.held));
@@ -421,23 +477,47 @@
     els.centsText.textContent = label;
   }
 
+  function startBeatLoop() {
+    if (state.beatTimerStarted) return;
+    state.beatTimerStarted = true;
+    state.beatStartAt = performance.now();
+    requestAnimationFrame(beatLoop);
+  }
+
+  function beatLoop() {
+    updateBeatIndicator();
+    requestAnimationFrame(beatLoop);
+  }
+
   function updateBeatIndicator(force = false) {
     if (!els.beatIndicator) return;
     const s = settings();
     const beats = s.beatsPerBar;
+    els.beatIndicator.style.setProperty('--beats', beats);
     if (force || els.beatIndicator.children.length !== beats) {
       els.beatIndicator.innerHTML = '';
       for (let i = 0; i < beats; i++) {
         const dot = document.createElement('div');
         dot.className = 'beatDot';
         dot.textContent = String(i + 1);
+        dot.setAttribute('aria-label', `tiempo ${i + 1}`);
         els.beatIndicator.appendChild(dot);
       }
     }
     const beatSec = 60 / s.bpm;
+    let elapsed;
     let active = -1;
-    if (state.isRecording && !state.isPaused) active = Math.floor(activeElapsed() / beatSec) % beats;
-    [...els.beatIndicator.children].forEach((dot, i) => dot.classList.toggle('active', i === active));
+    if (state.isRecording && !state.isPaused) {
+      elapsed = activeElapsed();
+      active = Math.floor(elapsed / beatSec) % beats;
+    } else if (!state.isPaused) {
+      elapsed = (performance.now() - state.beatStartAt) / 1000;
+      active = Math.floor(elapsed / beatSec) % beats;
+    }
+    [...els.beatIndicator.children].forEach((dot, i) => {
+      dot.classList.toggle('active', i === active);
+      dot.classList.toggle('past', active >= 0 && i < active);
+    });
   }
 
   async function beep(time = 0, freq = 880, duration = .04, gain = .09) {
@@ -516,22 +596,29 @@
       els.plainText.value = '';
 
       const mimeType = chooseMimeType();
-      state.mediaRecorder = new MediaRecorder(state.stream, mimeType ? { mimeType } : undefined);
-      state.mediaRecorder.ondataavailable = (ev) => {
-        if (ev.data && ev.data.size > 0) state.chunks.push(ev.data);
-      };
-      state.mediaRecorder.onstop = () => {
-        state.audioBlob = new Blob(state.chunks, { type: state.mediaRecorder.mimeType || 'audio/webm' });
-        els.downloadAudio.disabled = false;
-      };
+      if (window.MediaRecorder) {
+        state.mediaRecorder = new MediaRecorder(state.stream, mimeType ? { mimeType } : undefined);
+        state.mediaRecorder.ondataavailable = (ev) => {
+          if (ev.data && ev.data.size > 0) state.chunks.push(ev.data);
+        };
+        state.mediaRecorder.onstop = () => {
+          state.audioBlob = new Blob(state.chunks, { type: state.mediaRecorder.mimeType || 'audio/webm' });
+          els.downloadAudio.disabled = false;
+        };
+      } else {
+        state.mediaRecorder = null;
+        els.downloadAudio.disabled = true;
+        logDebug('MediaRecorder no disponible: grabo transcripción, no archivo de audio.');
+      }
 
       state.isRecording = true;
       state.isPaused = false;
       state.recordStart = performance.now();
+      state.beatStartAt = state.recordStart;
       state.pauseStart = 0;
       state.pausedTotal = 0;
       state.lastPitchAt = 0;
-      state.mediaRecorder.start(250);
+      if (state.mediaRecorder) state.mediaRecorder.start(250);
       startMetronome();
 
       els.recordBtn.disabled = true;
@@ -551,29 +638,29 @@
   }
 
   function pauseResume() {
-    if (!state.mediaRecorder || !state.isRecording) return;
+    if (!state.isRecording) return;
     if (!state.isPaused) {
       state.isPaused = true;
       state.pauseStart = performance.now();
-      state.mediaRecorder.pause();
+      if (state.mediaRecorder && state.mediaRecorder.state === 'recording') state.mediaRecorder.pause();
       els.pauseBtn.textContent = 'Reanudar';
       setStatus('Pausado. La transcripción no cuenta este tiempo.');
     } else {
       state.pausedTotal += performance.now() - state.pauseStart;
       state.pauseStart = 0;
       state.isPaused = false;
-      state.mediaRecorder.resume();
+      if (state.mediaRecorder && state.mediaRecorder.state === 'paused') state.mediaRecorder.resume();
       els.pauseBtn.textContent = 'Pausa';
       setStatus('Grabando de nuevo.');
     }
   }
 
   function stopRecording() {
-    if (!state.mediaRecorder || !state.isRecording) return;
+    if (!state.isRecording) return;
     state.isRecording = false;
     state.isPaused = false;
     stopMetronome();
-    state.mediaRecorder.stop();
+    if (state.mediaRecorder && state.mediaRecorder.state !== 'inactive') state.mediaRecorder.stop();
 
     els.recordBtn.disabled = false;
     els.pauseBtn.disabled = true;
@@ -1088,7 +1175,7 @@
   }
 
   function exportBaseName() {
-    return state.sessionId || `transcriptor-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`;
+    return `${APP_ID}-${state.sessionId || new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`;
   }
 
   function csvFromAnalysis(analysis) {
@@ -1223,9 +1310,10 @@
     els.debugOutput.textContent = 'Limpio.';
   });
 
-  [els.beatsPerBar, els.bpm].forEach(el => el.addEventListener('input', () => updateBeatIndicator(true)));
+  [els.beatsPerBar, els.bpm].forEach(el => el.addEventListener('input', () => { state.beatStartAt = performance.now(); updateBeatIndicator(true); }));
   [els.pitchTolerance, els.accidentals, els.micSensitivity].forEach(el => el?.addEventListener('change', () => updateTuner(state.lastStableData, null, settings())));
   updateBeatIndicator(true);
+  startBeatLoop();
 
   document.addEventListener('keydown', (ev) => {
     if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'd') {

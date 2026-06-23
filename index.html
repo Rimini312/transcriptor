@@ -3,16 +3,16 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Transcriptor · Trompeta Sib</title>
+  <title>Transcriptor v0.3.1</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <main class="app">
     <header class="hero">
       <div>
-        <p class="eyebrow">transcriptor</p>
-        <h1>Transcriptor · Trompeta Sib</h1>
-        <p class="lead">Afinador permanente, grabación con pausa y transcripción aproximada en compases y pentagrama.</p>
+        <p class="eyebrow">transcriptor <span id="versionBadge" class="versionBadge">v0.3.1</span></p>
+        <h1>Transcriptor <span class="titleVersion">v0.3.1</span></h1>
+        <p class="lead">Afinador permanente, grabación con pausa y transcripción aproximada para trompeta en Sib.</p>
       </div>
       <button id="debugToggle" class="ghost small" title="También Ctrl+D">Consola técnica</button>
     </header>
@@ -99,6 +99,14 @@
               <option value="12000">Muy larga</option>
             </select>
           </label>
+          <label>Micro
+            <select id="micSensitivity">
+              <option value="low">Baja</option>
+              <option value="normal" selected>Normal</option>
+              <option value="high">Alta</option>
+              <option value="max">Máxima</option>
+            </select>
+          </label>
         </div>
       </div>
 
@@ -111,6 +119,7 @@
           <button id="stopBtn" class="danger" disabled>Stop</button>
         </div>
         <p id="status" class="status">Esperando micrófono.</p>
+        <p id="inputLevelText" class="inputLevelText">Entrada: —</p>
       </div>
     </section>
 
@@ -126,9 +135,20 @@
             <div class="meterLine"></div>
             <div id="needle" class="needle"></div>
           </div>
-          <div class="meterLabels"><span>-50</span><span>0 cents</span><span>+50</span></div>
+          <div class="meterLabels"><span id="meterLeftLabel">-30</span><span id="meterCenterLabel">0 cents</span><span id="meterRightLabel">+30</span></div>
           <p id="centsText" class="cents">—</p>
+          <div class="signalWrap" aria-label="nivel de señal"><div id="signalFill" class="signalFill"></div></div>
         </div>
+      </div>
+    </section>
+
+    <section class="panel beat-panel">
+      <div class="sectionHead beat-head">
+        <div>
+          <h2>Pulso visual</h2>
+          <p class="muted">Guía de compás: marca el tiempo activo según BPM, incluso antes de grabar.</p>
+        </div>
+        <div id="beatIndicator" class="beatIndicator" aria-label="pulso visual"></div>
       </div>
     </section>
 
@@ -136,16 +156,19 @@
       <div class="sectionHead">
         <div>
           <h2>Transcripción</h2>
-          <p class="muted">Base aproximada. Haz clic en el texto si quieres corregirlo antes de copiar.</p>
+          <p class="muted">Base aproximada. El editor de texto es la versión limpia exportable.</p>
         </div>
         <div class="buttons smallButtons">
-          <button id="copyText" class="secondary">Copiar notas</button>
-          <button id="downloadJson" class="secondary">JSON</button>
+          <button id="copyText" class="secondary">Copiar</button>
+          <button id="downloadTxt" class="secondary">TXT</button>
+          <button id="downloadCsv" class="secondary">CSV</button>
+          <button id="downloadMusicXml" class="secondary">MusicXML</button>
+          <button id="downloadJson" class="secondary">JSON técnico</button>
           <button id="downloadAudio" class="secondary" disabled>Audio</button>
         </div>
       </div>
       <div id="staff" class="staff empty">El pentagrama aparecerá después de grabar.</div>
-      <div id="bars" class="bars empty">Aún no hay transcripción.</div>
+      <div id="bars" class="bars empty">Aún no hay transcripción visual.</div>
       <textarea id="plainText" spellcheck="false" placeholder="Aquí aparecerá la versión editable de la transcripción..."></textarea>
     </section>
 

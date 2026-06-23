@@ -1,99 +1,27 @@
-# Transcriptor · Trompeta Sib
+# Transcriptor v0.3.1
 
-Web estática para capturar ideas melódicas de trompeta en Sib.
+App web estática para afinar, grabar y transcribir bocetos melódicos de trompeta en Sib.
 
-Incluye:
+## Cambios v0.3.1
 
-- afinador permanente en tiempo real
-- botón para activar afinador sin grabar
-- grabación con pausa/reanudar
-- tap tempo
-- entrada de un compás opcional
-- división aproximada por compases
-- transcripción redondeada por sensibilidad de afinación y ritmo
-- pentagrama aproximado
-- consola técnica oculta para copiar datos de sesión y ajustar parámetros
-- exportación de audio y JSON técnico
+- Versión visible en la cabecera de la web: `Transcriptor v0.3.1`.
+- El informe técnico exporta `app: transcriptor-v0.3.1`.
+- Pulso visual visible y activo según BPM/compás, incluso antes de grabar.
+- Entrada de micro revisada: fallback `audio:true` si el navegador falla con restricciones avanzadas.
+- Afinador más sensible: se reduce la puerta de ruido que podía dejar la app aparentemente sorda.
+- Barra de entrada con `rms`, pico y claridad para depurar si realmente entra señal.
+- La grabación de transcripción funciona aunque `MediaRecorder` no esté disponible; en ese caso no exporta audio, pero sí texto/JSON/MusicXML.
 
-## Uso rápido
+## Uso
 
-1. Sube estos archivos a un repositorio de GitHub:
-   - `index.html`
-   - `style.css`
-   - `app.js`
-   - `README.md`
-2. Activa GitHub Pages:
-   - Settings → Pages → Deploy from branch → `main` → `/root`
-3. Abre la web publicada en HTTPS.
-4. Pulsa `Activar afinador` y da permiso al micrófono.
+1. Sube `index.html`, `style.css`, `app.js` y `README.md` al repositorio.
+2. Activa GitHub Pages.
+3. Abre la web en HTTPS.
+4. Pulsa **Activar afinador** y acepta el micrófono.
+5. Pulsa **Grabar** para capturar la sesión.
 
-> El micrófono del navegador necesita HTTPS o `localhost`. En GitHub Pages funciona.
-
-## Controles
-
-- `Activar afinador`: abre el micrófono y deja el afinador encendido sin grabar.
-- `Grabar`: inicia entrada, grabación y análisis.
-- `Pausa`: pausa el tiempo musical y la grabación.
-- `Stop`: analiza y genera transcripción.
-- `Tap tempo`: calcula BPM aproximado.
-- `Retención afinador`: decide cuánto aguanta la última nota cuando la señal se vuelve inestable.
-- `Consola técnica`: abre datos de depuración.
-- `Ctrl+D`: abre/cierra consola técnica.
-- `Espacio`: grabar o pausar, salvo cuando estás editando texto.
-
-## Modo trompeta en Sib
-
-La app escucha tono real y muestra nota escrita transpuesta.
-
-Ejemplo:
-
-- suena `Bb3`
-- muestra `C4` escrito
-
-## Cambios v0.2
-
-- Renombrada a `Transcriptor`.
-- Afinador activable sin grabar.
-- Afinador con retención de nota para evitar cortes bruscos.
-- Filtro de rango de trompeta para evitar falsos graves.
-- FFT ampliada a 8192 para lectura más estable.
-- Autocorrelación optimizada con corrección anti-subarmónicos.
-- Vista de pentagrama aproximado.
-- El informe técnico ahora identifica la app como `transcriptor-v0.2`.
-
-## Cómo pasar feedback a ChatGPT
-
-Después de grabar:
-
-1. Abre `Consola técnica`.
-2. Pulsa `Copiar informe para ChatGPT`.
-3. Pega el JSON en el chat junto con una frase tipo:
+URL esperada si el repo es `transcriptor`:
 
 ```txt
-En esta sesión me puso demasiadas corcheas. Yo quería que lo redondeara a negras.
+https://rimini312.github.io/transcriptor/
 ```
-
-Con ese informe se pueden ajustar:
-
-- sensibilidad de afinación
-- duración mínima de nota
-- detección de silencios
-- cuantización rítmica
-- modo estricto/humano/suelto
-- retención del afinador
-- rango de notas esperado
-
-## Limitaciones actuales
-
-Esta versión es un MVP. No intenta ser Sibelius ni Dorico. Sirve para capturar una idea monofónica y limpiarla.
-
-No detecta todavía:
-
-- tresillos complejos
-- ligaduras reales
-- articulaciones
-- dinámicas
-- tonalidad inteligente para decidir enharmonías complejas
-- exportación MIDI/MusicXML
-
-Eso se puede añadir después.
