@@ -432,3 +432,58 @@ textarea {
   .timeline { overflow-x: auto; padding-bottom: 4px; }
   .timelineLane { min-width: 520px; }
 }
+
+/* v0.3.2: pulso visual junto al afinador */
+.tuner {
+  grid-template-columns: minmax(190px, 290px) minmax(165px, 230px) minmax(280px, 1fr);
+}
+.pulseBox {
+  display: grid;
+  gap: 12px;
+  align-content: center;
+  justify-items: start;
+  min-width: 0;
+}
+.beatIndicator.compact {
+  justify-content: flex-start;
+  min-height: auto;
+  gap: 8px;
+}
+.beatIndicator.compact .beatDot {
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+  font-size: 15px;
+  background: #d9ded5;
+}
+.beatIndicator.compact .beatDot.past {
+  background: #c4cdc0;
+  color: var(--ink);
+}
+.beatIndicator.compact .beatDot.active {
+  background: #111711;
+  color: #fffef9;
+  border-color: #111711;
+  transform: scale(1.06);
+}
+
+/* v0.3.2: pentagrama real con abcjs */
+.staff {
+  min-height: 170px;
+}
+.staff .abcjs-container,
+.staff svg {
+  max-width: 100%;
+}
+.staff svg {
+  min-width: 0;
+}
+.staff text {
+  font-family: inherit;
+}
+
+@media (max-width: 980px) {
+  .tuner { grid-template-columns: 1fr; }
+  .pulseBox { justify-items: stretch; }
+  .beatIndicator.compact { justify-content: flex-start; }
+}

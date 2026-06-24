@@ -1,27 +1,34 @@
-# Transcriptor v0.3.1
+# Transcriptor v0.3.2
 
-App web estática para afinar, grabar y transcribir bocetos melódicos de trompeta en Sib.
+Web estática para GitHub Pages: afinador permanente, grabación con pausa y transcripción aproximada para trompeta en Sib.
 
-## Cambios v0.3.1
+## Cambios v0.3.2
 
-- Versión visible en la cabecera de la web: `Transcriptor v0.3.1`.
-- El informe técnico exporta `app: transcriptor-v0.3.1`.
-- Pulso visual visible y activo según BPM/compás, incluso antes de grabar.
-- Entrada de micro revisada: fallback `audio:true` si el navegador falla con restricciones avanzadas.
-- Afinador más sensible: se reduce la puerta de ruido que podía dejar la app aparentemente sorda.
-- Barra de entrada con `rms`, pico y claridad para depurar si realmente entra señal.
-- La grabación de transcripción funciona aunque `MediaRecorder` no esté disponible; en ese caso no exporta audio, pero sí texto/JSON/MusicXML.
+- Pulso visual colocado junto al afinador: cuadrados grises con el tiempo activo en negro.
+- Versión visible en la web y en el JSON técnico.
+- Pentagrama rehecho usando `abcjs` en vez del dibujo SVG manual anterior.
+- Exportación nueva en `.abc` además de TXT, CSV, MusicXML, JSON y audio.
+- La caja editable muestra la notación ABC que genera la partitura.
+- Las duraciones se exportan como unidades reales: semicorchea, corchea, negra, blanca, redonda y puntillos cuando proceda.
+- Los bemoles/sostenidos se escriben como accidentales ABC (`_` para bemol, `^` para sostenido) y se renderizan en pentagrama.
 
 ## Uso
 
-1. Sube `index.html`, `style.css`, `app.js` y `README.md` al repositorio.
-2. Activa GitHub Pages.
-3. Abre la web en HTTPS.
-4. Pulsa **Activar afinador** y acepta el micrófono.
-5. Pulsa **Grabar** para capturar la sesión.
+Sube estos archivos a GitHub Pages:
 
-URL esperada si el repo es `transcriptor`:
+- `index.html`
+- `style.css`
+- `app.js`
+- `README.md`
 
-```txt
-https://rimini312.github.io/transcriptor/
-```
+URL esperada:
+
+`https://rimini312.github.io/transcriptor/`
+
+## Nota técnica
+
+La partitura usa abcjs desde CDN:
+
+`https://cdn.jsdelivr.net/npm/abcjs@6.6.0/dist/abcjs-basic-min.js`
+
+Si no carga internet/CDN, la app mostrará el texto ABC como fallback.

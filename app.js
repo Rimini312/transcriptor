@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'v0.3.1';
+  const APP_VERSION = 'v0.3.2';
   const APP_ID = `transcriptor-${APP_VERSION}`;
 
   const $ = (id) => document.getElementById(id);
@@ -40,6 +40,7 @@
     plainText: $('plainText'),
     copyText: $('copyText'),
     downloadTxt: $('downloadTxt'),
+    downloadAbc: $('downloadAbc'),
     downloadCsv: $('downloadCsv'),
     downloadMusicXml: $('downloadMusicXml'),
     downloadJson: $('downloadJson'),
@@ -710,7 +711,8 @@
     const gridBeats = chooseGridBeats(segments, s);
     const quantized = quantizeSegments(segments, gridBeats, beatSec, barSec, s.beatsPerBar);
     const bars = buildBars(quantized);
-    const plain = barsToText(bars);
+    const human = barsToText(bars);
+    const abc = buildAbcFromBars(bars, s);
 
     return {
       summary: {
@@ -728,7 +730,9 @@
       segments,
       quantized,
       bars,
-      plain,
+      human,
+      abc,
+      plain: abc,
     };
   }
 
@@ -987,7 +991,8 @@
     }
     renderStaff(analysis);
     renderTimeline(analysis);
-    els.plainText.value = analysis.plain;
+    els.plainText.value = analysis.abc || analysis.plain || '';
+    if (analysis.abc) logDebug('ABC generado para pentagrama.');
   }
 
   function renderTimeline(analysis) {
@@ -1036,7 +1041,7 @@
   function appendEditHint(barNumber, ev) {
     const label = ev.label === 'REST' ? 'silencio' : ev.label;
     const hint = `
-# revisar compás ${barNumber}, pulso ${Number((ev.beatInBar + 1).toFixed(2))}: ${label} ${durationLabel(ev.durationBeats)}`;
+% revisar compás ${barNumber}, pulso ${Number((ev.beatInBar + 1).toFixed(2))}: ${label} ${durationLabel(ev.durationBeats)}`;
     if (!els.plainText.value.includes(hint.trim())) els.plainText.value += hint;
   }
 
@@ -1056,53 +1061,133 @@
     return '♬';
   }
 
-  function renderStaff(analysis) {
-    const bars = analysis.bars;
-    const beatsPerBar = settings().beatsPerBar;
-    const barW = 190;
-    const left = 42;
-    const right = 24;
-    const top = 38;
-    const lineGap = 10;
-    const staffTop = top + 22;
-    const staffBottom = staffTop + lineGap * 4;
-    const h = 128;
-    const w = Math.max(760, left + right + bars.length * barW);
-    const totalBars = bars.length;
-
-    let svg = `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Pentagrama aproximado">`;
-    for (let i = 0; i < 5; i++) {
-      const y = staffTop + i * lineGap;
-      svg += `<line class="staffLine" x1="${left}" y1="${y}" x2="${w - right}" y2="${y}" />`;
-    }
-    svg += `<text x="12" y="${staffTop + 28}" class="noteLabel">𝄞</text>`;
-
-    for (let b = 0; b <= totalBars; b++) {
-      const x = left + b * barW;
-      svg += `<line class="barLine" x1="${x}" y1="${staffTop - 8}" x2="${x}" y2="${staffBottom + 8}" />`;
-      if (b < totalBars) svg += `<text class="barNumber" x="${x + 6}" y="22">${bars[b].index + 1}</text>`;
-    }
-
-    for (let bi = 0; bi < bars.length; bi++) {
-      const bar = bars[bi];
-      const barX = left + bi * barW;
-      for (const ev of bar.events) {
-        const x = barX + 18 + clamp((ev.beatInBar || 0) / beatsPerBar, 0, .95) * (barW - 34);
-        if (ev.label === 'REST') {
-          svg += `<rect class="restMark" x="${x - 5}" y="${staffTop + 16}" width="10" height="8" rx="2" />`;
-          svg += `<text x="${x - 11}" y="${staffBottom + 30}">sil.</text>`;
-          continue;
+  function normalizeBarsForNotation(bars, beatsPerBar) {
+    if (!bars?.length) return [];
+    const maxIndex = Math.max(...bars.map(b => b.index));
+    const byIndex = new Map(bars.map(b => [b.index, b.events || []]));
+    const normalized = [];
+    for (let index = 0; index <= maxIndex; index++) {
+      const events = [...(byIndex.get(index) || [])].sort((a, b) => (a.beatInBar || 0) - (b.beatInBar || 0));
+      const out = [];
+      let cursor = 0;
+      for (const ev of events) {
+        let start = snapBeat(ev.beatInBar || 0);
+        if (start < cursor) start = cursor;
+        if (start > beatsPerBar) continue;
+        if (start - cursor >= 0.125) {
+          out.push(makeRest(cursor, start - cursor));
+          cursor = start;
         }
-        const y = yForMidiOnTreble(ev.midi, staffBottom, lineGap);
-        svg += ledgerLinesFor(y, x, staffTop, staffBottom, lineGap);
-        svg += `<ellipse class="noteHead" cx="${x}" cy="${y}" rx="7.2" ry="5.1" transform="rotate(-18 ${x} ${y})" />`;
-        svg += `<line class="staffLine" x1="${x + 7}" y1="${y}" x2="${x + 7}" y2="${Math.min(y + 34, staffBottom + 30)}" />`;
-        svg += `<text class="noteLabel" x="${x - 15}" y="${staffBottom + 30}">${escapeHtml(visualNoteName(ev.label))}</text>`;
+        let dur = snapDuration(ev.durationBeats || 0.25);
+        if (dur <= 0) continue;
+        if (cursor + dur > beatsPerBar) dur = beatsPerBar - cursor;
+        if (dur <= 0.05) continue;
+        out.push({ ...ev, beatInBar: Number(cursor.toFixed(3)), durationBeats: Number(dur.toFixed(3)) });
+        cursor = Number((cursor + dur).toFixed(3));
+        if (cursor >= beatsPerBar - 0.001) break;
+      }
+      if (cursor < beatsPerBar - 0.001) out.push(makeRest(cursor, beatsPerBar - cursor));
+      normalized.push({ index, events: mergeNotationEvents(out) });
+    }
+    return normalized;
+  }
+
+  function makeRest(beatInBar, durationBeats) {
+    return { label: 'REST', midi: null, beatInBar: Number(beatInBar.toFixed(3)), durationBeats: Number(durationBeats.toFixed(3)), centsAvg: null, clarityAvg: null };
+  }
+
+  function snapBeat(beats) {
+    return Math.max(0, Math.round((beats || 0) * 4) / 4);
+  }
+
+  function snapDuration(beats) {
+    return Math.max(0.25, Math.round((beats || 0.25) * 4) / 4);
+  }
+
+  function mergeNotationEvents(events) {
+    const out = [];
+    for (const ev of events) {
+      const prev = out[out.length - 1];
+      if (prev && prev.label === ev.label && Math.abs((prev.beatInBar + prev.durationBeats) - ev.beatInBar) < 0.01) {
+        prev.durationBeats = Number((prev.durationBeats + ev.durationBeats).toFixed(3));
+        continue;
+      }
+      out.push({ ...ev });
+    }
+    return out;
+  }
+
+  function buildAbcFromBars(bars, s = settings()) {
+    const normalized = normalizeBarsForNotation(bars, s.beatsPerBar || 4);
+    const meter = `${s.beatsPerBar || 4}/4`;
+    const lines = [
+      'X:1',
+      `T:Transcriptor ${APP_VERSION}`,
+      `M:${meter}`,
+      'L:1/16',
+      `Q:1/4=${s.bpm}`,
+      'K:C',
+      'V:1 clef=treble name="Trompeta Sib"',
+    ];
+    if (!normalized.length) return lines.concat(['| z16 |']).join('\n');
+    const barTokens = normalized.map(bar => bar.events.map(ev => eventToAbc(ev, s.accidentals)).join(' '));
+    const wrapped = [];
+    for (let i = 0; i < barTokens.length; i += 4) {
+      wrapped.push('| ' + barTokens.slice(i, i + 4).join(' | ') + ' |');
+    }
+    return lines.concat(wrapped).join('\n');
+  }
+
+  function eventToAbc(ev, accidentals) {
+    const units = Math.max(1, Math.round((ev.durationBeats || 0.25) * 4));
+    const dur = abcDuration(units);
+    if (ev.label === 'REST') return `z${dur}`;
+    return `${midiToAbc(ev.midi, accidentals)}${dur}`;
+  }
+
+  function abcDuration(units) {
+    return units === 1 ? '' : String(units);
+  }
+
+  function midiToAbc(midi, accidentals = 'flats') {
+    const rounded = Math.round(midi || 60);
+    const pc = ((rounded % 12) + 12) % 12;
+    const octave = Math.floor(rounded / 12) - 1;
+    const sharpMap = [ ['C',''], ['C','^'], ['D',''], ['D','^'], ['E',''], ['F',''], ['F','^'], ['G',''], ['G','^'], ['A',''], ['A','^'], ['B',''] ];
+    const flatMap  = [ ['C',''], ['D','_'], ['D',''], ['E','_'], ['E',''], ['F',''], ['G','_'], ['G',''], ['A','_'], ['A',''], ['B','_'], ['B',''] ];
+    const [letter, accidental] = (accidentals === 'sharps' ? sharpMap : flatMap)[pc];
+    return accidental + abcOctave(letter, octave);
+  }
+
+  function abcOctave(letter, octave) {
+    if (octave >= 5) return letter.toLowerCase() + "'".repeat(octave - 5);
+    if (octave === 4) return letter;
+    return letter + ','.repeat(4 - octave);
+  }
+
+  function renderStaff(analysis) {
+    const abc = analysis.abc || buildAbcFromBars(analysis.bars || [], settings());
+    els.staff.classList.remove('empty');
+    els.staff.innerHTML = '';
+    if (window.ABCJS?.renderAbc) {
+      try {
+        window.ABCJS.renderAbc(els.staff, abc, {
+          responsive: 'resize',
+          add_classes: true,
+          initialClef: true,
+          format: {
+            staffwidth: 760,
+            scale: 1.0,
+            lineThickness: 0.35,
+          },
+        });
+        return;
+      } catch (err) {
+        console.warn('abcjs render error', err);
+        logDebug(`ABCJS ERROR · ${err.message || err}`);
       }
     }
-    svg += '</svg>';
-    els.staff.classList.remove('empty');
-    els.staff.innerHTML = svg;
+    els.staff.textContent = abc;
   }
 
   function yForMidiOnTreble(midi, staffBottom, lineGap) {
@@ -1206,7 +1291,7 @@
   function musicXmlFromAnalysis(analysis) {
     const s = settings();
     const divisions = 4; // negra = 4, corchea = 2, semicorchea = 1
-    const measures = analysis?.bars || [];
+    const measures = normalizeBarsForNotation(analysis?.bars || [], s.beatsPerBar || 4);
     const title = 'Transcriptor';
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
     xml += `<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">\n`;
@@ -1221,11 +1306,12 @@
       for (const ev of bar.events) {
         const dur = Math.max(1, Math.round((ev.durationBeats || .25) * divisions));
         const type = xmlType(ev.durationBeats || .25);
+        const dot = xmlDot(ev.durationBeats || .25);
         if (ev.label === 'REST') {
-          xml += `      <note><rest/><duration>${dur}</duration><type>${type}</type></note>\n`;
+          xml += `      <note><rest/><duration>${dur}</duration><type>${type}</type>${dot}</note>\n`;
         } else {
           const pitch = pitchForXml(ev.midi, s.accidentals);
-          xml += `      <note><pitch><step>${pitch.step}</step>${pitch.alter !== 0 ? `<alter>${pitch.alter}</alter>` : ''}<octave>${pitch.octave}</octave></pitch><duration>${dur}</duration><type>${type}</type></note>\n`;
+          xml += `      <note><pitch><step>${pitch.step}</step>${pitch.alter !== 0 ? `<alter>${pitch.alter}</alter>` : ''}<octave>${pitch.octave}</octave></pitch><duration>${dur}</duration><type>${type}</type>${dot}</note>\n`;
         }
       }
       xml += `    </measure>\n`;
@@ -1252,6 +1338,11 @@
     return '16th';
   }
 
+  function xmlDot(beats) {
+    const units = Math.round((beats || 0) * 4);
+    return [3, 6, 12].includes(units) ? '<dot/>' : '';
+  }
+
   function escapeXml(str) {
     return String(str).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[ch]));
   }
@@ -1268,8 +1359,17 @@
   });
 
   els.downloadTxt.addEventListener('click', () => {
-    const text = els.plainText.value || '';
+    const analysis = state.lastAnalysis;
+    const text = analysis ? `${analysis.human || ''}
+
+--- ABC ---
+${analysis.abc || ''}` : (els.plainText.value || '');
     download(`${exportBaseName()}-transcripcion.txt`, new Blob([text], { type: 'text/plain;charset=utf-8' }));
+  });
+
+  els.downloadAbc?.addEventListener('click', () => {
+    const abc = state.lastAnalysis?.abc || els.plainText.value || '';
+    download(`${exportBaseName()}-partitura.abc`, new Blob([abc], { type: 'text/vnd.abc;charset=utf-8' }));
   });
 
   els.downloadCsv.addEventListener('click', () => {
