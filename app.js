@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'v0.3.2';
+  const APP_VERSION = 'v0.3.3';
   const APP_ID = `transcriptor-${APP_VERSION}`;
 
   const $ = (id) => document.getElementById(id);
@@ -18,6 +18,7 @@
     pitchTolerance: $('pitchTolerance'),
     rhythmMode: $('rhythmMode'),
     quantize: $('quantize'),
+    simplifyMode: $('simplifyMode'),
     holdNoteMs: $('holdNoteMs'),
     micSensitivity: $('micSensitivity'),
     tunerBtn: $('tunerBtn'),
@@ -43,6 +44,9 @@
     downloadAbc: $('downloadAbc'),
     downloadCsv: $('downloadCsv'),
     downloadMusicXml: $('downloadMusicXml'),
+    downloadSvg: $('downloadSvg'),
+    downloadPng: $('downloadPng'),
+    downloadJpg: $('downloadJpg'),
     downloadJson: $('downloadJson'),
     downloadAudio: $('downloadAudio'),
     debugToggle: $('debugToggle'),
@@ -85,6 +89,8 @@
     beatTimerStarted: false,
     beatStartAt: performance.now(),
     audioReady: false,
+    countingIn: false,
+    countInBeat: -1,
   };
 
   function settings() {
@@ -97,6 +103,7 @@
       pitchTolerance: Number(els.pitchTolerance.value) || 30,
       rhythmMode: els.rhythmMode.value,
       quantize: els.quantize.value,
+      simplifyMode: els.simplifyMode?.value || 'melodic',
       holdNoteMs: Number(els.holdNoteMs.value) || 7000,
       micSensitivity: els.micSensitivity?.value || 'normal',
       countIn: els.countIn.checked,
@@ -447,19 +454,23 @@
 
     document.body.classList.toggle('held-note', Boolean(data?.held));
     if (!data) {
-      const age = performance.now() - state.lastStableAt;
-      if (state.lastStableData && age <= (s.holdNoteMs || 7000)) {
+      // El afinador no debe "morirse" visualmente. Si hubo una nota fiable, se mantiene
+      // hasta que llegue otra. Si la barra de señal cae a cero, no hay forma física de medir pitch:
+      // se conserva la última lectura y se muestra la señal real.
+      if (state.lastStableData) {
         const last = state.lastStableData;
+        const ageSec = Math.max(0, (performance.now() - state.lastStableAt) / 1000);
         els.writtenNote.textContent = visualNoteName(noteName(last.writtenMidi, last.s.accidentals));
-        els.concertNote.textContent = `última nota: ${visualNoteName(noteName(last.concertMidi, last.s.accidentals))} · esperando señal estable`;
+        els.concertNote.textContent = `última nota: ${visualNoteName(noteName(last.concertMidi, last.s.accidentals))} · memoria ${ageSec.toFixed(1)}s`;
         const pos = clamp(50 + (last.cents / range) * 50, 0, 100);
         els.needle.style.left = `${pos}%`;
-        els.centsText.textContent = `última lectura ${last.cents >= 0 ? '+' : ''}${last.cents.toFixed(0)} cents · señal baja`;
+        const signalMsg = rms > 0.001 ? 'buscando pitch estable' : 'sin señal de audio';
+        els.centsText.textContent = `última lectura ${last.cents >= 0 ? '+' : ''}${last.cents.toFixed(0)} cents · ${signalMsg}`;
         return;
       }
       els.writtenNote.textContent = '—';
       els.concertNote.textContent = 'sonido real: —';
-      els.centsText.textContent = 'sin señal útil';
+      els.centsText.textContent = rms > 0.001 ? 'entra audio, buscando pitch' : 'sin señal útil';
       els.needle.style.left = '50%';
       return;
     }
@@ -508,7 +519,9 @@
     const beatSec = 60 / s.bpm;
     let elapsed;
     let active = -1;
-    if (state.isRecording && !state.isPaused) {
+    if (state.countingIn) {
+      active = clamp(state.countInBeat, 0, beats - 1);
+    } else if (state.isRecording && !state.isPaused) {
       elapsed = activeElapsed();
       active = Math.floor(elapsed / beatSec) % beats;
     } else if (!state.isPaused) {
@@ -539,11 +552,18 @@
     const s = settings();
     if (!s.countIn) return;
     const beat = 60 / s.bpm;
-    setStatus(`Entrada: ${s.beatsPerBar} pulsos...`);
+    state.countingIn = true;
+    setStatus(`Cuenta atrás: ${s.beatsPerBar} pulsos. Graba al volver al 1.`);
     for (let i = 0; i < s.beatsPerBar; i++) {
+      state.countInBeat = i;
+      updateBeatIndicator(true);
       beep(0, i === 0 ? 1040 : 780, .045, .07);
       await sleep(beat * 1000);
     }
+    state.countingIn = false;
+    state.countInBeat = -1;
+    state.beatStartAt = performance.now();
+    updateBeatIndicator(true);
   }
 
   function startMetronome() {
@@ -710,8 +730,10 @@
 
     const gridBeats = chooseGridBeats(segments, s);
     const quantized = quantizeSegments(segments, gridBeats, beatSec, barSec, s.beatsPerBar);
-    const bars = buildBars(quantized);
+    const rawBars = buildBars(quantized);
+    const bars = simplifyBars(rawBars, s);
     const human = barsToText(bars);
+    const simpleText = barsToSimpleText(bars);
     const abc = buildAbcFromBars(bars, s);
 
     return {
@@ -721,6 +743,7 @@
         segmentCount: segments.length,
         noteCount: quantized.filter(e => e.label !== 'REST').length,
         barCount: bars.length,
+        simplifyMode: s.simplifyMode,
         gridBeats,
         beatSec: Number(beatSec.toFixed(4)),
         barSec: Number(barSec.toFixed(4)),
@@ -729,10 +752,12 @@
       rawFrames,
       segments,
       quantized,
+      rawBars,
       bars,
       human,
+      simpleText,
       abc,
-      plain: abc,
+      plain: simpleText,
     };
   }
 
@@ -863,17 +888,26 @@
   }
 
   function chooseGridBeats(segments, s) {
-    if (s.quantize !== 'auto') return Number(s.quantize);
-    const beatSec = 60 / s.bpm;
-    const noteDurBeats = segments
-      .filter(seg => seg.label !== 'REST')
-      .map(seg => seg.duration / beatSec)
-      .filter(v => Number.isFinite(v) && v > .08);
-    if (!noteDurBeats.length) return 1;
-    const med = median(noteDurBeats);
-    if (med < .38) return .25;
-    if (med < .82) return .5;
-    return 1;
+    let grid;
+    if (s.quantize !== 'auto') grid = Number(s.quantize);
+    else {
+      const beatSec = 60 / s.bpm;
+      const noteDurBeats = segments
+        .filter(seg => seg.label !== 'REST')
+        .map(seg => seg.duration / beatSec)
+        .filter(v => Number.isFinite(v) && v > .08);
+      if (!noteDurBeats.length) grid = 1;
+      else {
+        const med = median(noteDurBeats);
+        if (med < .38) grid = .25;
+        else if (med < .82) grid = .5;
+        else grid = 1;
+      }
+    }
+    if (grid <= 0) return 0;
+    if (s.simplifyMode === 'melodic') grid = Math.max(grid || .5, .5);
+    if (s.simplifyMode === 'sketch') grid = Math.max(grid || 1, 1);
+    return grid;
   }
 
   function quantizeSegments(segments, gridBeats, beatSec, barSec, beatsPerBar) {
@@ -967,6 +1001,81 @@
       .map(([index, events]) => ({ index, events: events.sort((a, b) => a.beatInBar - b.beatInBar) }));
   }
 
+
+  function simplifyBars(bars, s) {
+    const mode = s.simplifyMode || 'melodic';
+    if (mode === 'detailed') return normalizeBarsForNotation(bars, s.beatsPerBar || 4);
+
+    const beatsPerBar = s.beatsPerBar || 4;
+    const step = mode === 'sketch' ? 1 : .5;
+    const allowed = mode === 'sketch' ? [1, 2, 3, 4] : [.5, 1, 1.5, 2, 3, 4];
+    const restAbsorb = mode === 'sketch' ? .75 : .5;
+    const normalized = [];
+
+    for (const bar of normalizeBarsForNotation(bars, beatsPerBar)) {
+      const out = [];
+      let cursor = 0;
+      const events = [...bar.events].sort((a, b) => a.beatInBar - b.beatInBar);
+
+      for (const ev of events) {
+        let start = snapToStep(ev.beatInBar || 0, step);
+        if (start < cursor) start = cursor;
+        if (start >= beatsPerBar - 0.001) break;
+
+        const gap = Number((start - cursor).toFixed(3));
+        if (gap >= step - 0.001) out.push(makeRest(cursor, snapAllowed(gap, allowed, step)));
+
+        let dur = snapAllowed(ev.durationBeats || step, allowed, step);
+        dur = Math.min(dur, beatsPerBar - start);
+        if (dur < step - 0.001) continue;
+
+        if (ev.label === 'REST') {
+          if (dur <= restAbsorb && out.length && out[out.length - 1].label !== 'REST') {
+            out[out.length - 1].durationBeats = Math.min(
+              beatsPerBar - out[out.length - 1].beatInBar,
+              Number((out[out.length - 1].durationBeats + dur).toFixed(3))
+            );
+            cursor = Number((start + dur).toFixed(3));
+            continue;
+          }
+          out.push(makeRest(start, dur));
+        } else {
+          out.push({ ...ev, beatInBar: Number(start.toFixed(3)), durationBeats: Number(dur.toFixed(3)) });
+        }
+        cursor = Number((start + dur).toFixed(3));
+      }
+      if (cursor < beatsPerBar - 0.001) out.push(makeRest(cursor, beatsPerBar - cursor));
+      normalized.push({ index: bar.index, events: mergeNotationEvents(out) });
+    }
+    return normalized;
+  }
+
+  function snapToStep(value, step) {
+    return Math.max(0, Math.round((value || 0) / step) * step);
+  }
+
+  function snapAllowed(value, allowed, minStep) {
+    const v = Math.max(minStep, value || minStep);
+    let best = allowed[0];
+    let bestDist = Infinity;
+    for (const a of allowed) {
+      const d = Math.abs(a - v);
+      if (d < bestDist) { best = a; bestDist = d; }
+    }
+    return best;
+  }
+
+  function barsToSimpleText(bars) {
+    if (!bars.length) return '';
+    return bars.map(bar => {
+      const items = bar.events
+        .filter(ev => ev.label !== 'REST')
+        .map(ev => `${visualNoteName(ev.label)} ${durationLabel(ev.durationBeats)}`)
+        .join(' · ');
+      return `Compás ${bar.index + 1}: ${items || 'silencio'}`;
+    }).join('\n');
+  }
+
   function barsToText(bars) {
     if (!bars.length) return '';
     return bars.map(bar => {
@@ -991,7 +1100,7 @@
     }
     renderStaff(analysis);
     renderTimeline(analysis);
-    els.plainText.value = analysis.abc || analysis.plain || '';
+    els.plainText.value = analysis.simpleText || analysis.plain || '';
     if (analysis.abc) logDebug('ABC generado para pentagrama.');
   }
 
@@ -1130,12 +1239,38 @@
       'V:1 clef=treble name="Trompeta Sib"',
     ];
     if (!normalized.length) return lines.concat(['| z16 |']).join('\n');
-    const barTokens = normalized.map(bar => bar.events.map(ev => eventToAbc(ev, s.accidentals)).join(' '));
+    const barTokens = normalized.map(bar => eventsToAbcGrouped(bar.events, s.accidentals, s.beatsPerBar || 4));
     const wrapped = [];
     for (let i = 0; i < barTokens.length; i += 4) {
       wrapped.push('| ' + barTokens.slice(i, i + 4).join(' | ') + ' |');
     }
     return lines.concat(wrapped).join('\n');
+  }
+
+
+  function eventsToAbcGrouped(events, accidentals, beatsPerBar) {
+    const groups = [];
+    let current = '';
+    let currentBeat = null;
+    const flush = () => {
+      if (current) groups.push(current);
+      current = '';
+      currentBeat = null;
+    };
+    for (const ev of events) {
+      const token = eventToAbc(ev, accidentals);
+      const beatGroup = Math.floor(ev.beatInBar || 0);
+      const beamable = ev.label !== 'REST' && (ev.durationBeats || 0) <= .5;
+      if (beamable) {
+        if (current && currentBeat === beatGroup) current += token;
+        else { flush(); current = token; currentBeat = beatGroup; }
+      } else {
+        flush();
+        groups.push(token);
+      }
+    }
+    flush();
+    return groups.join(' ');
   }
 
   function eventToAbc(ev, accidentals) {
@@ -1347,6 +1482,63 @@
     return String(str).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[ch]));
   }
 
+
+  function currentScoreSvg() {
+    return els.staff?.querySelector('svg') || null;
+  }
+
+  function downloadScoreSvg() {
+    const svg = currentScoreSvg();
+    if (!svg) { setStatus('No hay pentagrama SVG para exportar.'); return; }
+    const clone = svg.cloneNode(true);
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    const xml = new XMLSerializer().serializeToString(clone);
+    download(`${exportBaseName()}-partitura.svg`, new Blob([xml], { type: 'image/svg+xml;charset=utf-8' }));
+  }
+
+  async function downloadScoreImage(format = 'png') {
+    const svg = currentScoreSvg();
+    if (!svg) { setStatus('No hay pentagrama para exportar como imagen.'); return; }
+    const clone = svg.cloneNode(true);
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    const box = svg.viewBox?.baseVal;
+    const rect = svg.getBoundingClientRect();
+    const srcW = Math.max(1, box?.width || rect.width || 900);
+    const srcH = Math.max(1, box?.height || rect.height || 260);
+    clone.setAttribute('width', String(srcW));
+    clone.setAttribute('height', String(srcH));
+    const xml = new XMLSerializer().serializeToString(clone);
+    const url = URL.createObjectURL(new Blob([xml], { type: 'image/svg+xml;charset=utf-8' }));
+    const img = new Image();
+    img.decoding = 'async';
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = reject;
+      img.src = url;
+    });
+    const canvas = document.createElement('canvas');
+    // DIN A4 vertical a 150 dpi: suficiente para compartir/imprimir sin reventar el móvil.
+    canvas.width = 1240;
+    canvas.height = 1754;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const margin = 90;
+    const maxW = canvas.width - margin * 2;
+    const maxH = canvas.height - margin * 2;
+    const scale = Math.min(maxW / srcW, maxH / srcH);
+    const drawW = srcW * scale;
+    const drawH = srcH * scale;
+    ctx.drawImage(img, (canvas.width - drawW) / 2, margin, drawW, drawH);
+    URL.revokeObjectURL(url);
+    const mime = format === 'jpg' ? 'image/jpeg' : 'image/png';
+    const ext = format === 'jpg' ? 'jpg' : 'png';
+    canvas.toBlob(blob => {
+      if (!blob) { setStatus('No se pudo crear la imagen.'); return; }
+      download(`${exportBaseName()}-partitura-a4.${ext}`, blob);
+    }, mime, 0.94);
+  }
+
   els.tunerBtn.addEventListener('click', activateTuner);
   els.recordBtn.addEventListener('click', startRecording);
   els.pauseBtn.addEventListener('click', pauseResume);
@@ -1381,6 +1573,10 @@ ${analysis.abc || ''}` : (els.plainText.value || '');
     const xml = musicXmlFromAnalysis(state.lastAnalysis || { bars: [] });
     download(`${exportBaseName()}-transcripcion.musicxml`, new Blob([xml], { type: 'application/vnd.recordare.musicxml+xml;charset=utf-8' }));
   });
+
+  els.downloadSvg?.addEventListener('click', downloadScoreSvg);
+  els.downloadPng?.addEventListener('click', () => downloadScoreImage('png'));
+  els.downloadJpg?.addEventListener('click', () => downloadScoreImage('jpg'));
 
   els.downloadJson.addEventListener('click', () => {
     const report = buildReport(true);

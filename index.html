@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Transcriptor v0.3.2</title>
+  <title>Transcriptor v0.3.3</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <main class="app">
     <header class="hero">
       <div>
-        <p class="eyebrow">transcriptor <span id="versionBadge" class="versionBadge">v0.3.2</span></p>
-        <h1>Transcriptor <span class="titleVersion">v0.3.2</span></h1>
+        <p class="eyebrow">transcriptor <span id="versionBadge" class="versionBadge">v0.3.3</span></p>
+        <h1>Transcriptor <span class="titleVersion">v0.3.3</span></h1>
         <p class="lead">Afinador permanente, grabación con pausa y transcripción aproximada para trompeta en Sib.</p>
       </div>
       <button id="debugToggle" class="ghost small" title="También Ctrl+D">Consola técnica</button>
@@ -91,6 +91,13 @@
               <option value="0">Libre</option>
             </select>
           </label>
+          <label>Simplificar
+            <select id="simplifyMode">
+              <option value="detailed">Detallada</option>
+              <option value="melodic" selected>Melódica</option>
+              <option value="sketch">Boceto</option>
+            </select>
+          </label>
           <label>Retención afinador
             <select id="holdNoteMs">
               <option value="1200">Corta</option>
@@ -151,7 +158,7 @@
       <div class="sectionHead">
         <div>
           <h2>Transcripción</h2>
-          <p class="muted">Base aproximada. El editor de texto es la versión limpia exportable.</p>
+          <p class="muted">Base aproximada. La caja inferior muestra una lectura sencilla; ABC/MusicXML son para exportar.</p>
         </div>
         <div class="buttons smallButtons">
           <button id="copyText" class="secondary">Copiar</button>
@@ -159,13 +166,16 @@
           <button id="downloadAbc" class="secondary">ABC</button>
           <button id="downloadCsv" class="secondary">CSV</button>
           <button id="downloadMusicXml" class="secondary">MusicXML</button>
+          <button id="downloadSvg" class="secondary">SVG</button>
+          <button id="downloadPng" class="secondary">PNG A4</button>
+          <button id="downloadJpg" class="secondary">JPG A4</button>
           <button id="downloadJson" class="secondary">JSON técnico</button>
           <button id="downloadAudio" class="secondary" disabled>Audio</button>
         </div>
       </div>
       <div id="staff" class="staff empty">El pentagrama real aparecerá después de grabar.</div>
       <div id="bars" class="bars empty">Aún no hay transcripción visual.</div>
-      <textarea id="plainText" spellcheck="false" placeholder="Aquí aparecerá la notación ABC editable/exportable..."></textarea>
+      <textarea id="plainText" spellcheck="false" placeholder="Aquí aparecerá una versión simplificada por compases..."></textarea>
     </section>
 
     <section id="debugPanel" class="panel debug hidden">

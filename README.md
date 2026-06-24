@@ -1,8 +1,8 @@
-# Transcriptor v0.3.2
+# Transcriptor v0.3.3
 
 Web estática para GitHub Pages: afinador permanente, grabación con pausa y transcripción aproximada para trompeta en Sib.
 
-## Cambios v0.3.2
+## Cambios v0.3.3
 
 - Pulso visual colocado junto al afinador: cuadrados grises con el tiempo activo en negro.
 - Versión visible en la web y en el JSON técnico.
@@ -32,3 +32,11 @@ La partitura usa abcjs desde CDN:
 `https://cdn.jsdelivr.net/npm/abcjs@6.6.0/dist/abcjs-basic-min.js`
 
 Si no carga internet/CDN, la app mostrará el texto ABC como fallback.
+
+
+## v0.3.3
+- Cuenta atrás visual antes de grabar: la grabación empieza al volver al pulso 1.
+- Afinador con memoria visual permanente de la última nota estable.
+- Modo Simplificar: Detallada / Melódica / Boceto.
+- Exportación de pentagrama como SVG, PNG A4 y JPG A4.
+- MusicXML para abrir en MuseScore/MuseScore Studio.
