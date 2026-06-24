@@ -487,3 +487,46 @@ textarea {
   .pulseBox { justify-items: stretch; }
   .beatIndicator.compact { justify-content: flex-start; }
 }
+
+
+.countDisplay{
+  margin-top:10px;
+  min-height:32px;
+  font-size:1.45rem;
+  font-weight:800;
+  letter-spacing:.08em;
+  text-align:center;
+  color:var(--ink);
+}
+.countDisplay.rec{
+  color:#111;
+  animation:recPulse .35s ease-out 1;
+}
+@keyframes recPulse{from{transform:scale(1.08);opacity:.55}to{transform:scale(1);opacity:1}}
+.exportLinks{
+  margin:10px 0 14px;
+  padding:10px 12px;
+  border:1px solid var(--line);
+  border-radius:12px;
+  background:#fafafa;
+  font-size:.92rem;
+  color:var(--muted);
+}
+.exportLinks a{
+  margin-right:12px;
+  color:var(--ink);
+  font-weight:650;
+  text-decoration:underline;
+}
+.exportLinks.empty{display:none}
+.testModeBadge{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding:4px 8px;
+  border:1px solid var(--line);
+  border-radius:999px;
+  font-size:.78rem;
+  background:#fff;
+  color:var(--ink);
+}

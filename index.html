@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Transcriptor v0.3.3</title>
+  <title>Transcriptor v0.3.4</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <main class="app">
     <header class="hero">
       <div>
-        <p class="eyebrow">transcriptor <span id="versionBadge" class="versionBadge">v0.3.3</span></p>
-        <h1>Transcriptor <span class="titleVersion">v0.3.3</span></h1>
+        <p class="eyebrow">transcriptor <span id="versionBadge" class="versionBadge">v0.3.4</span></p>
+        <h1>Transcriptor <span class="titleVersion">v0.3.4</span></h1>
         <p class="lead">Afinador permanente, grabación con pausa y transcripción aproximada para trompeta en Sib.</p>
       </div>
       <button id="debugToggle" class="ghost small" title="También Ctrl+D">Consola técnica</button>
@@ -122,6 +122,7 @@
         <div class="buttons">
           <button id="tunerBtn" class="secondary">Activar afinador</button>
           <button id="recordBtn" class="primary">Grabar</button>
+          <button id="cMajorTestBtn" class="secondary">Prueba Do mayor ♩</button>
           <button id="pauseBtn" class="secondary" disabled>Pausa</button>
           <button id="stopBtn" class="danger" disabled>Stop</button>
         </div>
@@ -140,6 +141,7 @@
         <div class="pulseBox">
           <span class="label">pulso</span>
           <div id="beatIndicator" class="beatIndicator compact" aria-label="pulso visual"></div>
+          <div id="countDisplay" class="countDisplay" aria-live="polite">—</div>
         </div>
         <div class="meterWrap">
           <div class="meter">
@@ -174,6 +176,7 @@
         </div>
       </div>
       <div id="staff" class="staff empty">El pentagrama real aparecerá después de grabar.</div>
+      <div id="exportLinks" class="exportLinks empty">Exportaciones: aún no hay partitura.</div>
       <div id="bars" class="bars empty">Aún no hay transcripción visual.</div>
       <textarea id="plainText" spellcheck="false" placeholder="Aquí aparecerá una versión simplificada por compases..."></textarea>
     </section>

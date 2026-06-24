@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'v0.3.3';
+  const APP_VERSION = 'v0.3.4';
   const APP_ID = `transcriptor-${APP_VERSION}`;
 
   const $ = (id) => document.getElementById(id);
@@ -23,6 +23,7 @@
     micSensitivity: $('micSensitivity'),
     tunerBtn: $('tunerBtn'),
     recordBtn: $('recordBtn'),
+    cMajorTestBtn: $('cMajorTestBtn'),
     pauseBtn: $('pauseBtn'),
     stopBtn: $('stopBtn'),
     status: $('status'),
@@ -36,6 +37,8 @@
     signalFill: $('signalFill'),
     inputLevelText: $('inputLevelText'),
     beatIndicator: $('beatIndicator'),
+    countDisplay: $('countDisplay'),
+    exportLinks: $('exportLinks'),
     staff: $('staff'),
     bars: $('bars'),
     plainText: $('plainText'),
@@ -91,6 +94,8 @@
     audioReady: false,
     countingIn: false,
     countInBeat: -1,
+    currentMode: 'normal',
+    forcedScalePcs: null,
   };
 
   function settings() {
@@ -108,6 +113,8 @@
       micSensitivity: els.micSensitivity?.value || 'normal',
       countIn: els.countIn.checked,
       metronome: els.metronome.checked,
+      testMode: state.currentMode,
+      forcedScalePcs: state.forcedScalePcs,
       minConcertFreq: 135,
       maxConcertFreq: 1200,
       minWrittenMidi: 53, // F3 escrito aprox: evita falsos graves tipo F2
@@ -548,22 +555,37 @@
     osc.stop(start + duration);
   }
 
-  async function runCountIn() {
+  async function runCountIn(force = false) {
     const s = settings();
-    if (!s.countIn) return;
+    if (!force && !s.countIn) {
+      if (els.countDisplay) els.countDisplay.textContent = 'REC';
+      return;
+    }
     const beat = 60 / s.bpm;
+    const beats = s.beatsPerBar || 4;
     state.countingIn = true;
-    setStatus(`Cuenta atrás: ${s.beatsPerBar} pulsos. Graba al volver al 1.`);
-    for (let i = 0; i < s.beatsPerBar; i++) {
-      state.countInBeat = i;
+    setStatus(`Cuenta atrás: ${beats} · ${beats - 1} · ${beats - 2} · 1 · REC.`);
+    for (let step = beats; step >= 1; step--) {
+      const beatIndex = (beats - step) % beats;
+      state.countInBeat = beatIndex;
+      if (els.countDisplay) {
+        els.countDisplay.classList.remove('rec');
+        els.countDisplay.textContent = String(step);
+      }
       updateBeatIndicator(true);
-      beep(0, i === 0 ? 1040 : 780, .045, .07);
+      beep(0, step === beats ? 1040 : 780, .055, .08);
       await sleep(beat * 1000);
     }
     state.countingIn = false;
     state.countInBeat = -1;
     state.beatStartAt = performance.now();
+    if (els.countDisplay) {
+      els.countDisplay.textContent = 'REC';
+      els.countDisplay.classList.add('rec');
+    }
     updateBeatIndicator(true);
+    beep(0, 1180, .08, .08);
+    await sleep(40);
   }
 
   function startMetronome() {
@@ -598,12 +620,23 @@
     }
   }
 
-  async function startRecording() {
+  async function startRecording(mode = 'normal') {
     try {
+      state.currentMode = mode;
+      if (mode === 'c_major_scale') {
+        state.forcedScalePcs = [0, 2, 4, 5, 7, 9, 11];
+        els.quantize.value = '1';
+        els.simplifyMode.value = 'sketch';
+        els.accidentals.value = 'flats';
+        els.countIn.checked = true;
+        setStatus('Prueba Do mayor: toca Do-Re-Mi-Fa-Sol-La-Si-Do en negras, varias vueltas.');
+      } else {
+        state.forcedScalePcs = null;
+      }
       await activateTuner();
-      await runCountIn();
+      await runCountIn(mode === 'c_major_scale');
 
-      state.sessionId = `session-${Date.now()}`;
+      state.sessionId = `${mode === 'c_major_scale' ? 'cmajor-' : ''}session-${Date.now()}`;
       state.chunks = [];
       state.audioBlob = null;
       state.pitchFrames = [];
@@ -643,6 +676,7 @@
       startMetronome();
 
       els.recordBtn.disabled = true;
+      if (els.cMajorTestBtn) els.cMajorTestBtn.disabled = true;
       els.pauseBtn.disabled = false;
       els.stopBtn.disabled = false;
       els.pauseBtn.textContent = 'Pausa';
@@ -684,6 +718,7 @@
     if (state.mediaRecorder && state.mediaRecorder.state !== 'inactive') state.mediaRecorder.stop();
 
     els.recordBtn.disabled = false;
+    if (els.cMajorTestBtn) els.cMajorTestBtn.disabled = false;
     els.pauseBtn.disabled = true;
     els.stopBtn.disabled = true;
     els.pauseBtn.textContent = 'Pausa';
@@ -720,13 +755,15 @@
       const inRange = isNote && f.writtenMidi >= s.minWrittenMidi && f.writtenMidi <= s.maxWrittenMidi;
       const inTuneEnough = isNote && Math.abs(f.cents || 0) <= Math.max(82, s.pitchTolerance + 38);
       if (!inRange || !inTuneEnough) return { ...f, label: 'REST', midi: null };
-      return { ...f, label: noteName(f.writtenMidi, s.accidentals), midi: f.writtenMidi };
+      const snappedMidi = s.testMode === 'c_major_scale' ? snapMidiToScale(f.writtenMidi, s.forcedScalePcs || [0,2,4,5,7,9,11]) : f.writtenMidi;
+      return { ...f, writtenMidi: snappedMidi, label: noteName(snappedMidi, s.accidentals), midi: snappedMidi };
     });
 
     let segments = groupFrames(cleaned, silenceGap);
     segments = mergeTinySegments(segments, minDur);
     segments = mergeSameNeighbors(segments);
     segments = absorbShortRestsBetweenSameNotes(segments, silenceGap * 1.6);
+    segments = trimBoundaryRests(segments, s);
 
     const gridBeats = chooseGridBeats(segments, s);
     const quantized = quantizeSegments(segments, gridBeats, beatSec, barSec, s.beatsPerBar);
@@ -735,6 +772,7 @@
     const human = barsToText(bars);
     const simpleText = barsToSimpleText(bars);
     const abc = buildAbcFromBars(bars, s);
+    const scaleTest = s.testMode === 'c_major_scale' ? cMajorScaleReport(bars) : null;
 
     return {
       summary: {
@@ -744,6 +782,8 @@
         noteCount: quantized.filter(e => e.label !== 'REST').length,
         barCount: bars.length,
         simplifyMode: s.simplifyMode,
+        testMode: s.testMode || 'normal',
+        scaleLock: s.testMode === 'c_major_scale' ? 'C major written pitch' : 'off',
         gridBeats,
         beatSec: Number(beatSec.toFixed(4)),
         barSec: Number(barSec.toFixed(4)),
@@ -758,6 +798,7 @@
       simpleText,
       abc,
       plain: simpleText,
+      scaleTest,
     };
   }
 
@@ -771,6 +812,38 @@
         if (out[j].writtenMidi !== null && out[j].writtenMidi !== undefined) window.push(out[j].writtenMidi);
       }
       if (window.length >= 3) out[i].writtenMidi = Math.round(median(window));
+    }
+    return out;
+  }
+
+
+  function snapMidiToScale(midi, pcs) {
+    const rounded = Math.round(midi);
+    let best = rounded;
+    let bestDist = Infinity;
+    for (let m = rounded - 6; m <= rounded + 6; m++) {
+      const pc = ((m % 12) + 12) % 12;
+      if (!pcs.includes(pc)) continue;
+      const d = Math.abs(m - midi);
+      if (d < bestDist) { best = m; bestDist = d; }
+    }
+    return best;
+  }
+
+  function trimBoundaryRests(segments, s) {
+    const out = segments.map(seg => ({ ...seg }));
+    if (!out.length) return out;
+    if ((s.simplifyMode === 'melodic' || s.simplifyMode === 'sketch' || s.testMode === 'c_major_scale') && out[0]?.label === 'REST') {
+      // Para bocetos melódicos no interesa llenar la primera línea con esperas accidentales.
+      if (out[0].duration <= (s.testMode === 'c_major_scale' ? 4 : 1.25) * (60 / s.bpm)) out.shift();
+    }
+    while (out.length && out[out.length - 1].label === 'REST' && out[out.length - 1].duration <= 1.25 * (60 / s.bpm)) out.pop();
+    const shift = out[0]?.start || 0;
+    if (shift > 0) {
+      for (const seg of out) {
+        seg.start = Math.max(0, seg.start - shift);
+        seg.end = Math.max(seg.start, seg.end - shift);
+      }
     }
     return out;
   }
@@ -889,6 +962,7 @@
 
   function chooseGridBeats(segments, s) {
     let grid;
+    if (s.testMode === 'c_major_scale') return 1;
     if (s.quantize !== 'auto') grid = Number(s.quantize);
     else {
       const beatSec = 60 / s.bpm;
@@ -1065,6 +1139,26 @@
     return best;
   }
 
+
+  function cMajorScaleReport(bars) {
+    const expected = ['C', 'D', 'E', 'F', 'G', 'A', 'B', 'C'];
+    const notes = [];
+    for (const bar of bars || []) {
+      for (const ev of bar.events || []) {
+        if (ev.label !== 'REST') notes.push({ label: ev.label, letter: String(ev.label).replace(/[♭#b]/g, '').charAt(0), bar: bar.index + 1, beat: Number((ev.beatInBar + 1).toFixed(2)), durationBeats: ev.durationBeats });
+      }
+    }
+    const checks = notes.map((n, i) => ({ ...n, expected: expected[i % expected.length], ok: n.letter === expected[i % expected.length] }));
+    const errors = checks.filter(x => !x.ok);
+    return {
+      expectedPattern: expected.join(' '),
+      detectedPattern: notes.map(n => n.letter).join(' '),
+      noteCount: notes.length,
+      errorCount: errors.length,
+      errors: errors.slice(0, 24),
+    };
+  }
+
   function barsToSimpleText(bars) {
     if (!bars.length) return '';
     return bars.map(bar => {
@@ -1090,6 +1184,7 @@
   function renderAnalysis(analysis) {
     els.bars.classList.remove('empty');
     els.bars.innerHTML = '';
+    clearExportLinks();
     if (!analysis.bars.length) {
       els.staff.classList.add('empty');
       els.staff.textContent = 'No hay notas para pentagrama.';
@@ -1101,6 +1196,7 @@
     renderStaff(analysis);
     renderTimeline(analysis);
     els.plainText.value = analysis.simpleText || analysis.plain || '';
+    createReadyExportLinks(analysis);
     if (analysis.abc) logDebug('ABC generado para pentagrama.');
   }
 
@@ -1379,15 +1475,61 @@
   }
 
   function download(filename, blob) {
+    const url = URL.createObjectURL(blob);
+    addExportLink(filename, url, true);
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
+    a.href = url;
     a.download = filename;
+    a.rel = 'noopener';
+    a.target = '_blank';
     document.body.appendChild(a);
     a.click();
-    setTimeout(() => {
-      URL.revokeObjectURL(a.href);
-      a.remove();
-    }, 800);
+    setTimeout(() => a.remove(), 500);
+    setStatus(`Exportación preparada: ${filename}. Si no baja sola, usa el enlace que aparece bajo la partitura.`);
+  }
+
+  function clearExportLinks() {
+    if (!els.exportLinks) return;
+    els.exportLinks.innerHTML = '';
+    els.exportLinks.classList.add('empty');
+  }
+
+  function addExportLink(filename, url, revokeLater = false) {
+    if (!els.exportLinks) return;
+    els.exportLinks.classList.remove('empty');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = filename.split('-').slice(-1)[0] || filename;
+    a.title = filename;
+    els.exportLinks.appendChild(a);
+    if (revokeLater) setTimeout(() => URL.revokeObjectURL(url), 120000);
+  }
+
+  function createReadyExportLinks(analysis) {
+    clearExportLinks();
+    if (!analysis) return;
+    addStaticTextExport('TXT', `${exportBaseName()}-transcripcion.txt`, analysis.simpleText || analysis.plain || '');
+    addStaticTextExport('ABC', `${exportBaseName()}-partitura.abc`, analysis.abc || '');
+    addStaticTextExport('MusicXML', `${exportBaseName()}-transcripcion.musicxml`, musicXmlFromAnalysis(analysis));
+  }
+
+  function addStaticTextExport(label, filename, text) {
+    const blob = new Blob([text || ''], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    if (!els.exportLinks) return;
+    els.exportLinks.classList.remove('empty');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = label;
+    a.title = filename;
+    els.exportLinks.appendChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 120000);
   }
 
   async function copy(text) {
@@ -1484,7 +1626,7 @@
 
 
   function currentScoreSvg() {
-    return els.staff?.querySelector('svg') || null;
+    return els.staff?.querySelector('svg') || document.querySelector('#staff svg') || null;
   }
 
   function downloadScoreSvg() {
@@ -1508,7 +1650,7 @@
     clone.setAttribute('width', String(srcW));
     clone.setAttribute('height', String(srcH));
     const xml = new XMLSerializer().serializeToString(clone);
-    const url = URL.createObjectURL(new Blob([xml], { type: 'image/svg+xml;charset=utf-8' }));
+    const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
     const img = new Image();
     img.decoding = 'async';
     await new Promise((resolve, reject) => {
@@ -1530,17 +1672,23 @@
     const drawW = srcW * scale;
     const drawH = srcH * scale;
     ctx.drawImage(img, (canvas.width - drawW) / 2, margin, drawW, drawH);
-    URL.revokeObjectURL(url);
     const mime = format === 'jpg' ? 'image/jpeg' : 'image/png';
     const ext = format === 'jpg' ? 'jpg' : 'png';
-    canvas.toBlob(blob => {
-      if (!blob) { setStatus('No se pudo crear la imagen.'); return; }
-      download(`${exportBaseName()}-partitura-a4.${ext}`, blob);
-    }, mime, 0.94);
+    if (canvas.toBlob) {
+      canvas.toBlob(blob => {
+        if (!blob) { setStatus('No se pudo crear la imagen.'); return; }
+        download(`${exportBaseName()}-partitura-a4.${ext}`, blob);
+      }, mime, 0.94);
+    } else {
+      const dataUrl = canvas.toDataURL(mime, 0.94);
+      addExportLink(`${exportBaseName()}-partitura-a4.${ext}`, dataUrl, false);
+      setStatus(`Imagen ${ext.toUpperCase()} preparada en enlace.`);
+    }
   }
 
   els.tunerBtn.addEventListener('click', activateTuner);
-  els.recordBtn.addEventListener('click', startRecording);
+  els.recordBtn.addEventListener('click', () => startRecording('normal'));
+  els.cMajorTestBtn?.addEventListener('click', () => startRecording('c_major_scale'));
   els.pauseBtn.addEventListener('click', pauseResume);
   els.stopBtn.addEventListener('click', stopRecording);
   els.tapTempo.addEventListener('click', tapTempo);

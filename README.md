@@ -1,42 +1,37 @@
-# Transcriptor v0.3.3
+# Transcriptor v0.3.4
 
-Web estática para GitHub Pages: afinador permanente, grabación con pausa y transcripción aproximada para trompeta en Sib.
+App web estática para trompeta en Sib: afinador, pulso visual, grabación, transcripción aproximada y exportación.
 
-## Cambios v0.3.3
+## Cambios v0.3.4
 
-- Pulso visual colocado junto al afinador: cuadrados grises con el tiempo activo en negro.
-- Versión visible en la web y en el JSON técnico.
-- Pentagrama rehecho usando `abcjs` en vez del dibujo SVG manual anterior.
-- Exportación nueva en `.abc` además de TXT, CSV, MusicXML, JSON y audio.
-- La caja editable muestra la notación ABC que genera la partitura.
-- Las duraciones se exportan como unidades reales: semicorchea, corchea, negra, blanca, redonda y puntillos cuando proceda.
-- Los bemoles/sostenidos se escriben como accidentales ABC (`_` para bemol, `^` para sostenido) y se renderizan en pentagrama.
+- Versión visible en la web y en JSON: `transcriptor-v0.3.4`.
+- Cuenta atrás visual antes de grabar: `4 · 3 · 2 · 1 · REC`.
+- El audio empieza a grabarse después de la cuenta atrás.
+- Botón nuevo: **Prueba Do mayor ♩**.
+  - Fuerza cuantización a negras.
+  - Activa modo boceto.
+  - Bloquea la lectura a notas de Do mayor para evitar cromatismos falsos durante la prueba.
+  - El informe técnico incluye `scaleTest` con patrón esperado/detectado.
+- Exportación reforzada:
+  - Botones de descarga.
+  - Enlaces visibles bajo la partitura para móviles/navegadores que bloquean descargas automáticas.
+  - TXT, ABC, MusicXML, SVG, PNG A4, JPG A4, CSV, JSON técnico y audio si el navegador lo permite.
+- Recorte de silencios iniciales/finales cortos en modos melódicos para evitar compases de espera absurdos al principio.
 
-## Uso
+## Uso recomendado para test
 
-Sube estos archivos a GitHub Pages:
+1. BPM: 60.
+2. Pulsa **Prueba Do mayor ♩**.
+3. Espera la cuenta atrás `4 · 3 · 2 · 1 · REC`.
+4. Toca escrito en trompeta Sib: Do Re Mi Fa Sol La Si Do, todo en negras, varias veces.
+5. Copia la consola técnica y pásamela.
+
+## GitHub Pages
+
+Sube o sustituye estos archivos en el repositorio:
 
 - `index.html`
 - `style.css`
 - `app.js`
 - `README.md`
 
-URL esperada:
-
-`https://rimini312.github.io/transcriptor/`
-
-## Nota técnica
-
-La partitura usa abcjs desde CDN:
-
-`https://cdn.jsdelivr.net/npm/abcjs@6.6.0/dist/abcjs-basic-min.js`
-
-Si no carga internet/CDN, la app mostrará el texto ABC como fallback.
-
-
-## v0.3.3
-- Cuenta atrás visual antes de grabar: la grabación empieza al volver al pulso 1.
-- Afinador con memoria visual permanente de la última nota estable.
-- Modo Simplificar: Detallada / Melódica / Boceto.
-- Exportación de pentagrama como SVG, PNG A4 y JPG A4.
-- MusicXML para abrir en MuseScore/MuseScore Studio.
