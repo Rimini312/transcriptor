@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'v0.3.4';
+  const APP_VERSION = 'v0.3.5';
   const APP_ID = `transcriptor-${APP_VERSION}`;
 
   const $ = (id) => document.getElementById(id);
@@ -622,21 +622,22 @@
 
   async function startRecording(mode = 'normal') {
     try {
-      state.currentMode = mode;
+      state.currentMode = mode === 'c_major_scale' ? 'c_major_calibration' : mode;
       if (mode === 'c_major_scale') {
-        state.forcedScalePcs = [0, 2, 4, 5, 7, 9, 11];
-        els.quantize.value = '1';
-        els.simplifyMode.value = 'sketch';
+        // Calibración: NO bloquea a Do mayor. Solo compara después contra el patrón esperado.
+        state.forcedScalePcs = null;
+        els.quantize.value = 'auto';
+        if (els.simplifyMode) els.simplifyMode.value = 'adaptive';
         els.accidentals.value = 'flats';
         els.countIn.checked = true;
-        setStatus('Prueba Do mayor: toca Do-Re-Mi-Fa-Sol-La-Si-Do en negras, varias vueltas.');
+        setStatus('Calibración Do mayor: toca Do-Re-Mi-Fa-Sol-La-Si-Do en negras, varias vueltas. No se corrige la afinación.');
       } else {
         state.forcedScalePcs = null;
       }
       await activateTuner();
-      await runCountIn(mode === 'c_major_scale');
+      await runCountIn(true);
 
-      state.sessionId = `${mode === 'c_major_scale' ? 'cmajor-' : ''}session-${Date.now()}`;
+      state.sessionId = `${mode === 'c_major_scale' ? 'cmajor-cal-' : ''}session-${Date.now()}`;
       state.chunks = [];
       state.audioBlob = null;
       state.pitchFrames = [];
@@ -755,11 +756,13 @@
       const inRange = isNote && f.writtenMidi >= s.minWrittenMidi && f.writtenMidi <= s.maxWrittenMidi;
       const inTuneEnough = isNote && Math.abs(f.cents || 0) <= Math.max(82, s.pitchTolerance + 38);
       if (!inRange || !inTuneEnough) return { ...f, label: 'REST', midi: null };
-      const snappedMidi = s.testMode === 'c_major_scale' ? snapMidiToScale(f.writtenMidi, s.forcedScalePcs || [0,2,4,5,7,9,11]) : f.writtenMidi;
-      return { ...f, writtenMidi: snappedMidi, label: noteName(snappedMidi, s.accidentals), midi: snappedMidi };
+      // No se bloquea a ninguna escala: queremos ver oscilaciones reales y luego calibrar.
+      const detectedMidi = f.writtenMidi;
+      return { ...f, writtenMidi: detectedMidi, label: noteName(detectedMidi, s.accidentals), midi: detectedMidi };
     });
 
     let segments = groupFrames(cleaned, silenceGap);
+    segments = removeTransientSegments(segments, s, beatSec);
     segments = mergeTinySegments(segments, minDur);
     segments = mergeSameNeighbors(segments);
     segments = absorbShortRestsBetweenSameNotes(segments, silenceGap * 1.6);
@@ -772,7 +775,7 @@
     const human = barsToText(bars);
     const simpleText = barsToSimpleText(bars);
     const abc = buildAbcFromBars(bars, s);
-    const scaleTest = s.testMode === 'c_major_scale' ? cMajorScaleReport(bars) : null;
+    const scaleTest = s.testMode === 'c_major_calibration' ? cMajorCalibrationReport(bars, segments, rawFrames, s) : null;
 
     return {
       summary: {
@@ -783,7 +786,8 @@
         barCount: bars.length,
         simplifyMode: s.simplifyMode,
         testMode: s.testMode || 'normal',
-        scaleLock: s.testMode === 'c_major_scale' ? 'C major written pitch' : 'off',
+        scaleLock: 'off',
+        calibration: s.testMode === 'c_major_calibration' ? 'C major reference, no pitch lock' : 'off',
         gridBeats,
         beatSec: Number(beatSec.toFixed(4)),
         barSec: Number(barSec.toFixed(4)),
@@ -833,9 +837,9 @@
   function trimBoundaryRests(segments, s) {
     const out = segments.map(seg => ({ ...seg }));
     if (!out.length) return out;
-    if ((s.simplifyMode === 'melodic' || s.simplifyMode === 'sketch' || s.testMode === 'c_major_scale') && out[0]?.label === 'REST') {
+    if ((s.simplifyMode === 'melodic' || s.simplifyMode === 'adaptive' || s.simplifyMode === 'sketch' || s.testMode === 'c_major_calibration') && out[0]?.label === 'REST') {
       // Para bocetos melódicos no interesa llenar la primera línea con esperas accidentales.
-      if (out[0].duration <= (s.testMode === 'c_major_scale' ? 4 : 1.25) * (60 / s.bpm)) out.shift();
+      if (out[0].duration <= (s.testMode === 'c_major_calibration' ? 4 : 1.25) * (60 / s.bpm)) out.shift();
     }
     while (out.length && out[out.length - 1].label === 'REST' && out[out.length - 1].duration <= 1.25 * (60 / s.bpm)) out.pop();
     const shift = out[0]?.start || 0;
@@ -846,6 +850,68 @@
       }
     }
     return out;
+  }
+
+
+  function removeTransientSegments(segments, s, beatSec) {
+    if (!segments.length) return [];
+    const mode = s.simplifyMode || 'melodic';
+    const transientSec = mode === 'detailed'
+      ? Math.min(0.11, beatSec * 0.18)
+      : mode === 'adaptive' || s.testMode === 'c_major_calibration'
+        ? Math.min(0.22, beatSec * 0.34)
+        : mode === 'sketch'
+          ? Math.min(0.24, beatSec * 0.36)
+          : Math.min(0.18, beatSec * 0.28);
+    const restSec = mode === 'adaptive' || s.testMode === 'c_major_calibration'
+      ? Math.min(0.23, beatSec * 0.35)
+      : Math.min(0.18, beatSec * 0.28);
+    const out = [];
+    for (let i = 0; i < segments.length; i++) {
+      const seg = { ...segments[i] };
+      const prev = out[out.length - 1];
+      const next = segments[i + 1] ? { ...segments[i + 1] } : null;
+
+      if (seg.label === 'REST' && seg.duration <= restSec) {
+        if (prev && next && prev.label !== 'REST' && next.label !== 'REST') {
+          prev.end = next.start;
+          prev.duration = Math.max(prev.duration, prev.end - prev.start);
+          continue;
+        }
+        if (!prev || (next && next.label !== 'REST')) continue;
+      }
+
+      if (seg.label !== 'REST' && seg.duration <= transientSec) {
+        const prevNote = prev && prev.label !== 'REST' ? prev : null;
+        const nextNote = next && next.label !== 'REST' ? next : null;
+        if (nextNote && (!prevNote || nextNote.duration >= seg.duration * 1.15)) {
+          segments[i + 1] = { ...nextNote, start: seg.start, duration: Math.max(nextNote.duration, nextNote.end - seg.start) };
+          continue;
+        }
+        if (prevNote && prevNote.duration >= seg.duration * 1.15) {
+          prevNote.end = seg.end;
+          prevNote.duration = prevNote.end - prevNote.start;
+          continue;
+        }
+      }
+      out.push(seg);
+    }
+    return out;
+  }
+
+  function chooseAdaptiveGridBeats(segments, s) {
+    const beatSec = 60 / s.bpm;
+    const notes = segments.filter(seg => seg.label !== 'REST').sort((a, b) => a.start - b.start);
+    const iois = [];
+    for (let i = 1; i < notes.length; i++) {
+      const d = (notes[i].start - notes[i - 1].start) / beatSec;
+      if (Number.isFinite(d) && d > 0.12 && d < 8.1) iois.push(d);
+    }
+    const durs = notes.map(seg => seg.duration / beatSec).filter(v => Number.isFinite(v) && v > .12 && v < 8.1);
+    const basis = iois.length >= 3 ? median(iois) : (durs.length ? median(durs) : 1);
+    if (basis < .36) return .25;
+    if (basis < .72) return .5;
+    return 1;
   }
 
   function groupFrames(frames, silenceGap) {
@@ -962,9 +1028,10 @@
 
   function chooseGridBeats(segments, s) {
     let grid;
-    if (s.testMode === 'c_major_scale') return 1;
     if (s.quantize !== 'auto') grid = Number(s.quantize);
-    else {
+    else if (s.simplifyMode === 'adaptive' || s.testMode === 'c_major_calibration') {
+      grid = chooseAdaptiveGridBeats(segments, s);
+    } else {
       const beatSec = 60 / s.bpm;
       const noteDurBeats = segments
         .filter(seg => seg.label !== 'REST')
@@ -1081,9 +1148,9 @@
     if (mode === 'detailed') return normalizeBarsForNotation(bars, s.beatsPerBar || 4);
 
     const beatsPerBar = s.beatsPerBar || 4;
-    const step = mode === 'sketch' ? 1 : .5;
-    const allowed = mode === 'sketch' ? [1, 2, 3, 4] : [.5, 1, 1.5, 2, 3, 4];
-    const restAbsorb = mode === 'sketch' ? .75 : .5;
+    const step = mode === 'sketch' ? 1 : (mode === 'adaptive' ? .25 : .5);
+    const allowed = mode === 'sketch' ? [1, 2, 3, 4] : (mode === 'adaptive' ? [.25, .5, .75, 1, 1.5, 2, 3, 4] : [.5, 1, 1.5, 2, 3, 4]);
+    const restAbsorb = mode === 'sketch' ? .75 : (mode === 'adaptive' ? .35 : .5);
     const normalized = [];
 
     for (const bar of normalizeBarsForNotation(bars, beatsPerBar)) {
@@ -1097,7 +1164,12 @@
         if (start >= beatsPerBar - 0.001) break;
 
         const gap = Number((start - cursor).toFixed(3));
-        if (gap >= step - 0.001) out.push(makeRest(cursor, snapAllowed(gap, allowed, step)));
+        if (gap >= step - 0.001 && gap > restAbsorb) {
+          out.push(makeRest(cursor, snapAllowed(gap, allowed, step)));
+        } else if (gap > 0 && gap <= restAbsorb) {
+          // Si entras un poco tarde respecto al pulso, no escribas un silencio microscópico antes.
+          start = cursor;
+        }
 
         let dur = snapAllowed(ev.durationBeats || step, allowed, step);
         dur = Math.min(dur, beatsPerBar - start);
@@ -1140,24 +1212,51 @@
   }
 
 
-  function cMajorScaleReport(bars) {
+  function cMajorCalibrationReport(bars, segments, rawFrames, s) {
     const expected = ['C', 'D', 'E', 'F', 'G', 'A', 'B', 'C'];
     const notes = [];
     for (const bar of bars || []) {
       for (const ev of bar.events || []) {
-        if (ev.label !== 'REST') notes.push({ label: ev.label, letter: String(ev.label).replace(/[♭#b]/g, '').charAt(0), bar: bar.index + 1, beat: Number((ev.beatInBar + 1).toFixed(2)), durationBeats: ev.durationBeats });
+        if (ev.label !== 'REST') {
+          notes.push({
+            label: ev.label,
+            letter: noteLetter(ev.label),
+            midi: ev.midi,
+            bar: bar.index + 1,
+            beat: Number((ev.beatInBar + 1).toFixed(2)),
+            durationBeats: ev.durationBeats,
+            centsAvg: ev.centsAvg ?? null,
+            clarityAvg: ev.clarityAvg ?? null,
+          });
+        }
       }
     }
     const checks = notes.map((n, i) => ({ ...n, expected: expected[i % expected.length], ok: n.letter === expected[i % expected.length] }));
     const errors = checks.filter(x => !x.ok);
+    const chromaticFrames = (rawFrames || []).filter(f => {
+      if (f.writtenMidi === null || f.writtenMidi === undefined) return false;
+      const pc = ((Math.round(f.writtenMidi) % 12) + 12) % 12;
+      return ![0, 2, 4, 5, 7, 9, 11].includes(pc);
+    }).map(f => ({ t: f.t, note: f.writtenNote, cents: f.cents, rms: f.rms, clarity: f.clarity })).slice(0, 60);
     return {
+      mode: 'reference-only-no-pitch-lock',
+      instruction: 'Tocar Do Re Mi Fa Sol La Si Do en negras. El informe compara, no corrige.',
       expectedPattern: expected.join(' '),
       detectedPattern: notes.map(n => n.letter).join(' '),
       noteCount: notes.length,
       errorCount: errors.length,
-      errors: errors.slice(0, 24),
+      errors: errors.slice(0, 32),
+      chromaticFrameCount: (rawFrames || []).length ? (rawFrames || []).filter(f => f.writtenMidi !== null && f.writtenMidi !== undefined && ![0,2,4,5,7,9,11].includes(((Math.round(f.writtenMidi)%12)+12)%12)).length : 0,
+      chromaticFrames,
+      segmentPreview: (segments || []).slice(0, 40).map(seg => ({ label: seg.label, start: Number(seg.start.toFixed(3)), duration: Number(seg.duration.toFixed(3)), midi: seg.midi, centsAvg: seg.centsAvg, clarityAvg: seg.clarityAvg })),
     };
   }
+
+  function noteLetter(label) {
+    const m = String(label || '').match(/[A-G]/);
+    return m ? m[0] : '';
+  }
+
 
   function barsToSimpleText(bars) {
     if (!bars.length) return '';

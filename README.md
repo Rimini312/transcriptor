@@ -1,10 +1,10 @@
-# Transcriptor v0.3.4
+# Transcriptor v0.3.5
 
 App web estática para trompeta en Sib: afinador, pulso visual, grabación, transcripción aproximada y exportación.
 
-## Cambios v0.3.4
+## Cambios v0.3.5
 
-- Versión visible en la web y en JSON: `transcriptor-v0.3.4`.
+- Versión visible en la web y en JSON: `transcriptor-v0.3.5`.
 - Cuenta atrás visual antes de grabar: `4 · 3 · 2 · 1 · REC`.
 - El audio empieza a grabarse después de la cuenta atrás.
 - Botón nuevo: **Prueba Do mayor ♩**.
@@ -35,3 +35,10 @@ Sube o sustituye estos archivos en el repositorio:
 - `app.js`
 - `README.md`
 
+
+
+## v0.3.5
+
+- Modo Calibrar Do mayor sin bloqueo tonal: compara el patrón esperado, pero no corrige notas.
+- Nueva simplificación adaptativa para reducir silencios microscópicos y cromatismos de ataque.
+- La cuenta atrás se fuerza antes de grabar para alinear el inicio al pulso 1.
